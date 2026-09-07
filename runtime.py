@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -199,6 +200,11 @@ def account_dir(chat_id, state_key=None):
         return None  # default ~/.claude, unchanged behavior
     d = os.path.join(ACCOUNTS_DIR, str(chat_id))
     os.makedirs(d, exist_ok=True)
+    claude_md = os.path.join(d, "CLAUDE.md")
+    if not os.path.exists(claude_md):
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
+        shutil.copyfile(os.path.join(repo_dir, "personality.example.md"), claude_md)
+        shutil.copyfile(os.path.join(repo_dir, "HANDOFF.md"), os.path.join(d, "handoff.md"))
     return d
 
 

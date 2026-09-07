@@ -774,13 +774,18 @@ def feed_login_code(chat_id, code, state):
                 )
                 d = json.loads(r.stdout)
                 if d.get("loggedIn"):
-                    set_account_status(state, chat_id, "ready")
+                    if str(chat_id) == str(OWNER_ID):
+                        set_account_status(state, chat_id, "ready")
+                        success_message = "✅ Аккаунт подключён. Можно пользоваться ботом."
+                    else:
+                        set_account_status(state, chat_id, "awaiting_display_name")
+                        success_message = "✅ Аккаунт подключён.\n\nКак к тебе обращаться?"
                     _cleanup_login(chat_id, info)
                     # A persistent Claude process may have cached the expired
                     # OAuth session.  Recreate it on the next prompt so the
                     # fresh credentials are definitely used.
                     _stop_chat_process(chat_id)
-                    send_message(chat_id, "✅ Аккаунт подключён. Можно пользоваться ботом.")
+                    send_message(chat_id, success_message)
                     return
             except Exception:
                 pass
@@ -815,6 +820,19 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
             feed_login_code(chat_id, text.strip(), state)
         else:
             send_message(chat_id, "Жду код авторизации (пришли его текстом, без команд).")
+        return True
+
+    elif status == "awaiting_display_name":
+        tenant_dir = account_dir(chat_id)
+        if tenant_dir:
+            claude_md = os.path.join(tenant_dir, "CLAUDE.md")
+            if os.path.exists(claude_md):
+                with open(claude_md, encoding="utf-8") as f:
+                    personality = f.read()
+                with open(claude_md, "w", encoding="utf-8") as f:
+                    f.write(personality.replace("<user>", (text or "").strip()))
+        set_account_status(state, chat_id, "ready")
+        send_message(chat_id, "✅ Готово. Можно пользоваться ботом.")
         return True
 
     start_login(chat_id, state)
