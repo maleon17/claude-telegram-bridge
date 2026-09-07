@@ -35,6 +35,14 @@ file-channel: it drops a request into a local file that the *running* Codex bot
 polls and feeds straight into its own queue, so one assistant can delegate a
 task to the other without a Telegram round-trip. It is optional.
 
+Non-owner tenants also receive a user-scoped stdio MCP server named
+`delegate-to-codex` in their isolated `CLAUDE_CONFIG_DIR/.claude.json`. Its
+single `delegate_to_codex(prompt)` tool takes no Telegram id: it inherits the
+server-owned `CHAT_ID` from the tenant's `claude -p` process, writes a request
+to the sibling Codex bot's dedicated per-request queue, and returns only the
+immediate accept/reject status. The eventual answer arrives from the Codex bot
+in the same Telegram chat. The owner config is deliberately left unchanged.
+
 ## Topology
 
 - One systemd service runs `bridge.py`. `bridge.py` is only the launcher:

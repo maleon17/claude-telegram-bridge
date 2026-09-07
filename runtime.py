@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -185,6 +186,48 @@ def _ensure_symlink(link_path, target_path):
     os.symlink(target_path, link_path)
 
 
+def _ensure_tenant_mcp_config(config_dir):
+    config_path = os.path.join(config_dir, ".claude.json")
+    if os.path.exists(config_path):
+        with open(config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        if not isinstance(config, dict):
+            raise ValueError(f"Claude config root is not an object: {config_path}")
+    else:
+        config = {}
+
+    servers = config.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"Claude mcpServers is not an object: {config_path}")
+    if "delegate-to-codex" in servers:
+        return
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    servers["delegate-to-codex"] = {
+        "type": "stdio",
+        "command": os.path.abspath(sys.executable),
+        "args": [os.path.join(repo_dir, "delegate_to_codex_mcp.py")],
+        # Leave this empty: the child must inherit the per-process CHAT_ID
+        # injected by claude_env(), never a persisted or caller-chosen id.
+        "env": {},
+    }
+    temporary = f"{config_path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "x", encoding="utf-8") as handle:
+            json.dump(config, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, config_path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def account_dir(chat_id, state_key=None):
     delegated = state_key is not None and str(state_key) != str(chat_id)
     if delegated:
@@ -205,6 +248,7 @@ def account_dir(chat_id, state_key=None):
         repo_dir = os.path.dirname(os.path.abspath(__file__))
         shutil.copyfile(os.path.join(repo_dir, "personality.example.md"), claude_md)
         shutil.copyfile(os.path.join(repo_dir, "HANDOFF.md"), os.path.join(d, "handoff.md"))
+    _ensure_tenant_mcp_config(d)
     return d
 
 
