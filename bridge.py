@@ -18,6 +18,7 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -27,8 +28,9 @@ from runtime import (
     chat_procs, chat_procs_lock, current_offset, load_whitelist,
 )
 from state_store import (
-    clear_pending_prompt, get_pending_prompt, load_state, pop_pending_restart,
-    pop_restart_request, set_pending_restart, set_permission_mode,
+    clear_pending_prompt, get_account_status, get_pending_prompt, load_state,
+    pop_pending_restart, pop_restart_request, set_pending_restart,
+    set_permission_mode,
 )
 from chat_process import (
     _chat_proc_idle_reaper_loop, _shutdown_chat_processes, _stop_chat_process,
@@ -42,6 +44,11 @@ from telegram_api import (
     download_telegram_file, edit_message, rich_message_to_markdown, send_message,
     tg_call, transcribe_voice,
 )
+
+
+BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
+CROSS_DELEGATE_QUEUE_DIR = os.path.join(BRIDGE_DIR, "cross_delegate_queue")
+CROSS_DELEGATE_RESULT_DIR = os.path.join(BRIDGE_DIR, "cross_delegate_result")
 
 
 def _is_forwarded_message(msg):
@@ -253,6 +260,95 @@ def _external_request_watcher_loop(state):
         )
 
 
+def _write_cross_delegate_result(request_id, ok, text):
+    os.makedirs(CROSS_DELEGATE_RESULT_DIR, mode=0o700, exist_ok=True)
+    result_path = os.path.join(CROSS_DELEGATE_RESULT_DIR, f"{request_id}.json")
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{request_id}.", suffix=".tmp", dir=CROSS_DELEGATE_RESULT_DIR,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"done": True, "ok": bool(ok), "text": text},
+                handle,
+                ensure_ascii=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, result_path)
+    except Exception:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _cross_delegate_watcher_loop(state):
+    """Accept per-user Codex-to-Claude requests from the dedicated queue."""
+    os.makedirs(CROSS_DELEGATE_QUEUE_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(CROSS_DELEGATE_RESULT_DIR, mode=0o700, exist_ok=True)
+    while True:
+        time.sleep(0.5)
+        pattern = os.path.join(CROSS_DELEGATE_QUEUE_DIR, "*.json")
+        for request_path in sorted(glob.glob(pattern)):
+            request_id = os.path.splitext(os.path.basename(request_path))[0]
+            try:
+                with open(request_path, encoding="utf-8") as handle:
+                    request = json.load(handle)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                print(
+                    f"Could not read cross-delegate request {request_id}: {exc}",
+                    flush=True,
+                )
+                request = None
+            try:
+                os.remove(request_path)
+            except FileNotFoundError:
+                pass
+
+            ok = False
+            if not isinstance(request, dict):
+                result_text = "Отклонено: повреждённый формат запроса делегации."
+            else:
+                chat_id = request.get("chat_id")
+                text = request.get("text")
+                if not isinstance(chat_id, int) or isinstance(chat_id, bool):
+                    result_text = "Отклонено: некорректный Telegram chat_id."
+                elif not isinstance(text, str) or not text.strip():
+                    result_text = "Отклонено: пустой текст задачи."
+                elif str(chat_id) not in load_whitelist():
+                    result_text = (
+                        "Отклонено: этот Telegram ID отсутствует в whitelist Claude bridge."
+                    )
+                elif get_account_status(state, chat_id) != "ready":
+                    result_text = (
+                        "Отклонено: Claude-аккаунт для этого Telegram ID не готов. "
+                        "Сначала заверши /login в Claude bridge."
+                    )
+                else:
+                    ok = start_delegate_turn(chat_id, text, state)
+                    if ok:
+                        result_text = (
+                            "Принято: Claude bridge запустил задачу. Результат придёт "
+                            "в этот же Telegram-чат от Claude bridge."
+                        )
+                    else:
+                        result_text = (
+                            "Отклонено: уже выполняется предыдущая делегированная задача."
+                        )
+            try:
+                _write_cross_delegate_result(request_id, ok, result_text)
+            except Exception as exc:
+                print(
+                    f"Could not write cross-delegate result {request_id}: {exc}",
+                    flush=True,
+                )
+
+
 def _pop_wakeup_signals():
     """Returns a list of {"chat_id", "note"} dicts, one per valid signal
     file found -- unlike pop_restart_request (one global restart, at most
@@ -355,6 +451,7 @@ def main():
 
     threading.Thread(target=_restart_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_external_request_watcher_loop, args=(state,), daemon=True).start()
+    threading.Thread(target=_cross_delegate_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_wakeup_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_chat_proc_idle_reaper_loop, daemon=True).start()
 

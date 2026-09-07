@@ -3,6 +3,8 @@ state*.json
 codex_bot_state.json
 last_turn_*.json
 external_request.json
+cross_delegate_queue/
+cross_delegate_result/
 whitelist.txt
 accounts/
 uploads_*/
