@@ -24,8 +24,10 @@ import time
 import traceback
 
 from runtime import (
-    EXTERNAL_REQUEST_FILE, OWNER_ID, SERVICE_NAME, WAKEUP_SIGNAL_DIR, busy_chats,
-    chat_procs, chat_procs_lock, current_offset, load_whitelist,
+    EXTERNAL_REQUEST_FILE, FILE_SEND_MAX_CAPTION_CHARS, FILE_SEND_QUEUE_DIR,
+    FILE_SEND_RESULT_DIR, MAX_DOCUMENT_BYTES, OWNER_ID, SERVICE_NAME,
+    WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset,
+    ensure_owner_mcp_config, load_whitelist, tenant_file_outbox,
 )
 from state_store import (
     clear_pending_prompt, get_account_status, get_pending_prompt, load_state,
@@ -42,13 +44,100 @@ from handlers import (
 )
 from telegram_api import (
     download_telegram_file, edit_message, rich_message_to_markdown, send_message,
-    tg_call, transcribe_voice,
+    send_document, tg_call, transcribe_voice,
 )
 
 
 BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
 CROSS_DELEGATE_QUEUE_DIR = os.path.join(BRIDGE_DIR, "cross_delegate_queue")
 CROSS_DELEGATE_RESULT_DIR = os.path.join(BRIDGE_DIR, "cross_delegate_result")
+
+
+def _write_file_send_result(request_id, ok, text):
+    os.makedirs(FILE_SEND_RESULT_DIR, mode=0o700, exist_ok=True)
+    target = os.path.join(FILE_SEND_RESULT_DIR, f"{request_id}.json")
+    temporary = os.path.join(FILE_SEND_RESULT_DIR, f".{request_id}.{os.getpid()}.tmp")
+    try:
+        with open(temporary, "x", encoding="utf-8") as handle:
+            json.dump({"done": True, "ok": bool(ok), "text": text}, handle, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _file_in_tenant_outbox(chat_id, path):
+    try:
+        source = os.path.realpath(path)
+        outbox = os.path.realpath(tenant_file_outbox(chat_id))
+        if os.path.commonpath([source, outbox]) != outbox or not os.path.isfile(source):
+            return None
+    except (OSError, TypeError, ValueError):
+        return None
+    return source
+
+
+def _file_send_watcher_loop():
+    """Deliver tenant MCP outbox files with the bridge-owned Telegram token."""
+    os.makedirs(FILE_SEND_QUEUE_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(FILE_SEND_RESULT_DIR, mode=0o700, exist_ok=True)
+    while True:
+        time.sleep(0.5)
+        for request_path in sorted(glob.glob(os.path.join(FILE_SEND_QUEUE_DIR, "*.json"))):
+            request_id = os.path.splitext(os.path.basename(request_path))[0]
+            try:
+                with open(request_path, encoding="utf-8") as handle:
+                    request = json.load(handle)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                print(f"Could not read file-send request {request_id}: {exc}", flush=True)
+                request = None
+            try:
+                os.remove(request_path)
+            except FileNotFoundError:
+                pass
+
+            ok = False
+            if not isinstance(request, dict):
+                result_text = "Отклонено: повреждённый запрос отправки файла."
+            else:
+                chat_id = request.get("chat_id")
+                path = request.get("path")
+                caption = request.get("caption", "")
+                if not isinstance(chat_id, int) or isinstance(chat_id, bool):
+                    result_text = "Отклонено: некорректный Telegram chat_id."
+                elif str(chat_id) not in load_whitelist():
+                    result_text = "Отклонено: Telegram ID отсутствует в whitelist Claude bridge."
+                elif not isinstance(path, str) or not isinstance(caption, str):
+                    result_text = "Отклонено: некорректный путь или подпись."
+                elif len(caption) > FILE_SEND_MAX_CAPTION_CHARS:
+                    result_text = "Отклонено: подпись длиннее лимита Telegram."
+                else:
+                    source = _file_in_tenant_outbox(chat_id, path)
+                    if source is None:
+                        result_text = "Отклонено: файл должен быть обычным файлом из CLAUDE_TELEGRAM_OUTBOX."
+                    elif os.path.getsize(source) > MAX_DOCUMENT_BYTES:
+                        result_text = f"Отклонено: файл больше {MAX_DOCUMENT_BYTES} байт."
+                    else:
+                        result = send_document(chat_id, source, caption)
+                        ok = bool(result.get("ok"))
+                        result_text = (
+                            f"Файл «{os.path.basename(source)}» отправлен в Telegram."
+                            if ok else "Telegram не принял файл: " + str(
+                                result.get("description") or result.get("error") or result
+                            )[:500]
+                        )
+            try:
+                _write_file_send_result(request_id, ok, result_text)
+            except Exception as exc:
+                print(f"Could not write file-send result {request_id}: {exc}", flush=True)
 
 
 def _is_forwarded_message(msg):
@@ -432,6 +521,10 @@ def _wakeup_watcher_loop(state):
 
 
 def main():
+    try:
+        ensure_owner_mcp_config()
+    except Exception as exc:
+        print(f"owner could not seed tenant MCP servers: {exc}", flush=True)
     state = load_state()
     offset = 0
     print("Claude Telegram bridge starting...", flush=True)
@@ -452,6 +545,7 @@ def main():
     threading.Thread(target=_restart_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_external_request_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_cross_delegate_watcher_loop, args=(state,), daemon=True).start()
+    threading.Thread(target=_file_send_watcher_loop, daemon=True).start()
     threading.Thread(target=_wakeup_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_chat_proc_idle_reaper_loop, daemon=True).start()
 

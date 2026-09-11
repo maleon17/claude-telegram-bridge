@@ -118,6 +118,23 @@ ACCOUNTS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(STATE_FILE)), "accounts"
 )
 DELEGATED_ACCOUNTS_DIR = os.path.join(ACCOUNTS_DIR, "delegated")
+FILE_SEND_QUEUE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "file_send_queue"
+)
+FILE_SEND_RESULT_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "file_send_result"
+)
+FILE_SEND_MAX_CAPTION_CHARS = 1024
+FILE_SEND_AGENTS_MARKER = "## Отправка файлов в Telegram"
+FILE_SEND_AGENTS_SECTION = """
+## Отправка файлов в Telegram
+
+Чтобы отправить пользователю готовый документ, сначала создай или скопируй его
+в каталог из переменной `CLAUDE_TELEGRAM_OUTBOX`, затем вызови MCP-тул
+`send_telegram_file` с абсолютным путём к файлу и, при необходимости, `caption`.
+Не пытайся искать или использовать токен Telegram: этот тул отправляет файл
+только в текущий чат и не раскрывает секреты бота.
+""".strip()
 
 # These are bridge control-plane values, not Claude Code configuration.  Do
 # not let them cross the process boundary into a Claude child process.
@@ -199,18 +216,25 @@ def _ensure_tenant_mcp_config(config_dir):
     servers = config.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         raise ValueError(f"Claude mcpServers is not an object: {config_path}")
-    if "delegate-to-codex" in servers:
-        return
-
     repo_dir = os.path.dirname(os.path.abspath(__file__))
-    servers["delegate-to-codex"] = {
-        "type": "stdio",
-        "command": os.path.abspath(sys.executable),
-        "args": [os.path.join(repo_dir, "delegate_to_codex_mcp.py")],
-        # Leave this empty: the child must inherit the per-process CHAT_ID
-        # injected by claude_env(), never a persisted or caller-chosen id.
-        "env": {},
-    }
+    changed = False
+    for name, script in (
+        ("delegate-to-codex", "delegate_to_codex_mcp.py"),
+        ("send-telegram-file", "send_telegram_file_mcp.py"),
+    ):
+        if name in servers:
+            continue
+        servers[name] = {
+            "type": "stdio",
+            "command": os.path.abspath(sys.executable),
+            "args": [os.path.join(repo_dir, script)],
+            # Leave this empty: the child must inherit the per-process CHAT_ID
+            # injected by claude_env(), never a persisted or caller-chosen id.
+            "env": {},
+        }
+        changed = True
+    if not changed:
+        return
     temporary = f"{config_path}.{uuid.uuid4().hex}.tmp"
     try:
         with open(temporary, "x", encoding="utf-8") as handle:
@@ -226,6 +250,10 @@ def _ensure_tenant_mcp_config(config_dir):
         except FileNotFoundError:
             pass
         raise
+
+
+def ensure_owner_mcp_config():
+    _ensure_tenant_mcp_config(default_claude_config_dir())
 
 
 def account_dir(chat_id, state_key=None):
@@ -248,8 +276,27 @@ def account_dir(chat_id, state_key=None):
         repo_dir = os.path.dirname(os.path.abspath(__file__))
         shutil.copyfile(os.path.join(repo_dir, "personality.example.md"), claude_md)
         shutil.copyfile(os.path.join(repo_dir, "HANDOFF.md"), os.path.join(d, "handoff.md"))
+    _ensure_tenant_file_send_instructions(claude_md)
     _ensure_tenant_mcp_config(d)
     return d
+
+
+def tenant_file_outbox(chat_id):
+    path = os.path.join(ACCOUNTS_DIR, str(chat_id), "outbox")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def _ensure_tenant_file_send_instructions(claude_md):
+    try:
+        with open(claude_md, encoding="utf-8") as handle:
+            content = handle.read()
+    except FileNotFoundError:
+        return
+    if FILE_SEND_AGENTS_MARKER in content:
+        return
+    with open(claude_md, "w", encoding="utf-8") as handle:
+        handle.write(content.rstrip() + "\n\n" + FILE_SEND_AGENTS_SECTION + "\n")
 
 
 def claude_env(config_dir, chat_id=None, extra_env=None):
@@ -274,6 +321,7 @@ def claude_env(config_dir, chat_id=None, extra_env=None):
         # WAKEUP_SIGNAL_DIR above.
         env["CHAT_ID"] = str(chat_id)
         env["WAKEUP_SIGNAL_DIR"] = WAKEUP_SIGNAL_DIR
+        env["CLAUDE_TELEGRAM_OUTBOX"] = tenant_file_outbox(chat_id)
     return env
 
 # ---------------------------------------------------------------------------

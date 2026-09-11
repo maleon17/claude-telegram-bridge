@@ -13,6 +13,7 @@ Drives `claude -p --output-format=stream-json` per message and streams progress 
 - **Multi-tenant** — a simple `whitelist.txt` gates access. Anyone besides the owner who's whitelisted goes through their own `claude auth login` (a button + pasted code, right in the chat) and gets a fully isolated Claude account (own subscription, own sessions, own usage) — no shared billing.
 - **Model / permission control** — `/model` to switch between Opus/Sonnet/Haiku/Fable and specific versions, `/mode` to switch between auto-approve and a real approve/deny gate for tool calls.
 - **Files & photos** — incoming photos/documents are downloaded and handed to Claude to read natively; outgoing files Claude creates (or mentions by path) get sent back as Telegram attachments automatically.
+- **Explicit file delivery** — `send_telegram_file` lets an agent return a file deliberately from `CLAUDE_TELEGRAM_OUTBOX`, bound to its current chat without exposing the bot token.
 - **Rich messages** — incoming Telegram "rich messages" (tables, collapsible sections, etc.) are converted to Markdown so they don't get silently dropped; outgoing collapsible process logs use the same rich-message format.
 - **Forwarded-message batching** — forwarding a batch of messages at once combines them into a single prompt instead of processing only the first and bouncing the rest.
 
