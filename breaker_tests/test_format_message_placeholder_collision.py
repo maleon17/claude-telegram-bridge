@@ -54,7 +54,7 @@ fixed or not. This version checks for the correctly ESCAPED form instead
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/.claude-telegram-bridge"))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from telegram_format import escape_mdv2, format_message  # noqa: E402
 
 

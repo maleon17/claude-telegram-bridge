@@ -35,7 +35,9 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
+import uuid
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OWNER_ID = 8480261623
@@ -54,28 +56,44 @@ def external_request_path():
     )
 
 
-def last_turn_path(chat_id, delegated=False):
-    # Mirrors chat_process.py's write_last_turn():
-    # os.path.join(os.path.dirname(STATE_FILE),
-    #              f"last_turn_{STATE_INSTANCE_NAME}{'_delegate' if delegated else ''}_{chat_id}.json").
-    state_file = os.environ.get(
-        "BRIDGE_EXEC_STATE_FILE", PRIMARY_STATE_FILE,
-    )
+def external_request_dir():
+    # Mirrors runtime.py's EXTERNAL_REQUEST_DIR / EXTERNAL_RESULT_DIR.
+    return external_request_path() + ".d"
+
+
+def external_result_dir():
+    state_file = os.environ.get("BRIDGE_EXEC_STATE_FILE", PRIMARY_STATE_FILE)
     state_instance_name = os.path.splitext(os.path.basename(state_file))[0]
-    signal_suffix = "_delegate" if delegated else ""
     return os.path.join(
         os.path.dirname(os.path.abspath(state_file)),
-        f"last_turn_{state_instance_name}{signal_suffix}_{chat_id}.json",
+        f"external_result_{state_instance_name}.d",
     )
 
 
-def poll_until_done(chat_id, baseline_ts, timeout_s, poll_interval=2):
-    """Poll the last-turn signal FILE chat_process.py writes on every
-    completed turn, not Telegram's getUpdates -- bridge.py already owns
-    that bot token's getUpdates stream exclusively (only one consumer ever
-    sees a given update), so a second independent poller there would just
-    starve forever. See chat_process.py's write_last_turn()."""
-    path = last_turn_path(chat_id, delegated=True)
+def submit_request(request):
+    """Publish one request under a unique id; never overwrites another caller."""
+    request_id = uuid.uuid4().hex
+    directory = external_request_dir()
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{request_id}.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(request, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, os.path.join(directory, f"{request_id}.json"))
+    except Exception:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return request_id
+
+
+def poll_request_result(request_id, timeout_s, poll_interval=2):
+    """Wait for the result file of exactly this request."""
+    path = os.path.join(external_result_dir(), f"{request_id}.json")
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
@@ -83,10 +101,19 @@ def poll_until_done(chat_id, baseline_ts, timeout_s, poll_interval=2):
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             data = None
-        if data and data.get("ts", 0) > baseline_ts:
-            return data["text"]
+        if isinstance(data, dict):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            return data
         time.sleep(poll_interval)
-    raise TimeoutError(f'No completed turn signalled via {path} within {timeout_s}s.')
+    # Withdraw the request if the bridge never picked it up.
+    try:
+        os.remove(os.path.join(external_request_dir(), f"{request_id}.json"))
+    except FileNotFoundError:
+        pass
+    raise TimeoutError(f"No result for request {request_id} within {timeout_s}s.")
 
 
 def parse_env_assignments(assignments):
@@ -167,21 +194,6 @@ def main():
             )
             sys.exit(1)
 
-    request_path = external_request_path()
-    if os.path.exists(request_path):
-        print(f"{request_path} already has an unconsumed request -- "
-              f"bridge.py hasn't picked it up yet, or it's stuck. Not overwriting.",
-              file=sys.stderr)
-        sys.exit(1)
-
-    # Baseline BEFORE writing the request -- only a last_turn file written
-    # strictly after this counts as ours, not a stale prior turn's.
-    try:
-        with open(last_turn_path(chat_id, delegated=True), encoding="utf-8") as f:
-            baseline_ts = json.load(f).get("ts", 0)
-    except (FileNotFoundError, json.JSONDecodeError):
-        baseline_ts = 0
-
     request = {"chat_id": chat_id, "text": " ".join(args.prompt)}
     if args.workspace:
         request["workspace"] = args.workspace
@@ -199,18 +211,17 @@ def main():
     # the footer ("your session, before delegation") so they can return to
     # it; nothing needs to be passed here for that.
 
-    tmp = request_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(request, f)
-    os.replace(tmp, request_path)
-
+    request_id = submit_request(request)
     try:
-        final_text = poll_until_done(chat_id, baseline_ts, args.timeout)
+        result = poll_request_result(request_id, args.timeout)
     except TimeoutError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 
-    print(final_text)
+    if not result.get("ok", True):
+        print(result.get("text", ""), file=sys.stderr)
+        sys.exit(1)
+    print(result.get("text", ""))
 
 
 if __name__ == "__main__":

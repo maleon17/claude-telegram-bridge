@@ -8,18 +8,19 @@ import time
 import traceback
 
 from runtime import (
-    CHAT_PROC_IDLE_TIMEOUT_S, CLAUDE_BIN, EDIT_THROTTLE_S, STATE_FILE,
+    CHAT_PROC_IDLE_TIMEOUT_S, CLAUDE_BIN, EDIT_THROTTLE_S, EXTERNAL_RESULT_DIR, STATE_FILE,
     STATE_INSTANCE_NAME, THINKING_SPINNER_FRAMES, WORKDIR, busy_chats, chat_procs,
     chat_procs_lock, claude_env,
 )
 from state_store import (
     add_usage, clear_pending_prompt, get_pending_delegator, get_session,
-    reset_cost_warning_baseline, set_pending_delegator, set_pending_prompt,
-    set_session,
+    pending_deliveries, pop_delegate_request_id, reset_cost_warning_baseline,
+    set_pending_delegator,
+    set_pending_delivery, set_pending_prompt, set_session,
 )
 from telegram_api import (
     edit_rich, extract_existing_files, send_attachment, send_message, send_rich,
-    tg_call,
+    split_rich_text, tg_call,
 )
 from telegram_format import escape_mdv2, fenced_code, mdv2_fenced_code, strip_mdv2
 
@@ -63,7 +64,7 @@ def _draft_clean(s, limit=200):
     return re.sub(r"\s+", " ", s).strip()[:limit]
 
 
-def write_last_turn(chat_id, text, delegated=False):
+def write_last_turn(chat_id, text, delegated=False, ok=True):
     """Signal a completed turn's final text via a plain file instead of
     Telegram's getUpdates -- this process already owns that bot token's
     getUpdates stream exclusively (only one consumer can ever see a given
@@ -76,10 +77,126 @@ def write_last_turn(chat_id, text, delegated=False):
     tmp = path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"text": text, "ts": time.time()}, f)
+            json.dump({"text": text, "ts": time.time(), "ok": bool(ok)}, f)
         os.replace(tmp, path)
     except OSError:
         pass
+
+
+DELIVERY_MAX_ATTEMPTS = 8
+DELIVERY_FIRST_RETRY_S = 30
+_delivery_guard = threading.Lock()
+_delivering_keys = set()
+
+
+def _finish_delivery(state, state_key, delivery, ok):
+    set_pending_delivery(state, state_key, None)
+    text = delivery.get("text") or ""
+    if not ok:
+        text = "⚠️ Ответ не удалось доставить в Telegram:\n\n" + text
+    if delivery.get("signal_last_turn"):
+        write_last_turn(
+            delivery.get("chat_id"), text, delegated=bool(delivery.get("delegated")), ok=ok,
+        )
+    write_request_result(
+        delivery.get("request_id"), text, ok=not delivery.get("stopped"), delivered=ok,
+    )
+
+
+def deliver_pending_final(state, state_key, delivery):
+    """Deliver a persisted final answer from its first unacknowledged chunk.
+
+    Only one delivery per state key runs at a time, so the retry loop can
+    never duplicate an attempt the finishing turn is still making. Returns
+    True once every chunk has been acknowledged by Telegram."""
+    with _delivery_guard:
+        if state_key in _delivering_keys:
+            return False
+        _delivering_keys.add(state_key)
+    try:
+        chat_id, text = delivery.get("chat_id"), delivery.get("text")
+        if chat_id is None or not isinstance(text, str):
+            set_pending_delivery(state, state_key, None)
+            return False
+        parts = delivery.get("parts")
+        if not isinstance(parts, list) or not parts:
+            parts = split_rich_text(text)
+        for index in range(int(delivery.get("next_part") or 0), len(parts)):
+            if index == 0 and delivery.get("edit_message_id") is not None:
+                result = edit_rich(chat_id, delivery["edit_message_id"], parts[0])
+            else:
+                result = send_rich(chat_id, parts[index])
+            if not result or not result.get("ok"):
+                attempts = int(delivery.get("attempts") or 0) + 1
+                if attempts == 1:
+                    # Don't keep a waiting bridge_exec.py caller blocked on
+                    # Telegram retries: it gets the text now, flagged as not
+                    # yet delivered; a later successful retry re-signals ok.
+                    pending_text = "⚠️ Telegram пока не принял ответ, доставка повторяется:\n\n" + text
+                    if delivery.get("signal_last_turn"):
+                        write_last_turn(
+                            chat_id, pending_text,
+                            delegated=bool(delivery.get("delegated")), ok=False,
+                        )
+                    write_request_result(
+                        delivery.get("request_id"), pending_text,
+                        ok=not delivery.get("stopped"), delivered=False,
+                    )
+                    delivery = dict(delivery, request_id=None)
+                if attempts >= DELIVERY_MAX_ATTEMPTS:
+                    print(f"giving up final delivery for {state_key} after {attempts} attempts", flush=True)
+                    _finish_delivery(state, state_key, delivery, ok=False)
+                    return False
+                set_pending_delivery(state, state_key, dict(
+                    delivery, parts=parts, next_part=index, attempts=attempts,
+                    # A failed in-place edit is retried as a fresh message.
+                    edit_message_id=None,
+                    next_retry_at=time.time() + min(300, 2 ** attempts),
+                ))
+                return False
+            delivery = dict(delivery, parts=parts, next_part=index + 1)
+            if index + 1 < len(parts):
+                set_pending_delivery(state, state_key, delivery)
+        _finish_delivery(state, state_key, delivery, ok=True)
+        return True
+    finally:
+        with _delivery_guard:
+            _delivering_keys.discard(state_key)
+
+
+def retry_pending_finals(state):
+    now = time.time()
+    for state_key, delivery in pending_deliveries(state):
+        if float(delivery.get("next_retry_at") or 0) <= now:
+            deliver_pending_final(state, state_key, delivery)
+
+
+def _pending_delivery_watcher_loop(state):
+    while True:
+        try:
+            retry_pending_finals(state)
+        except Exception:
+            print(traceback.format_exc()[-1500:], flush=True)
+        time.sleep(2)
+
+
+REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+
+
+def write_request_result(request_id, text, ok=True, delivered=True):
+    """Result for exactly one bridge_exec.py request (see EXTERNAL_REQUEST_DIR)."""
+    if not request_id or not REQUEST_ID_RE.fullmatch(str(request_id)):
+        return
+    try:
+        os.makedirs(EXTERNAL_RESULT_DIR, mode=0o700, exist_ok=True)
+        target = os.path.join(EXTERNAL_RESULT_DIR, f"{request_id}.json")
+        temporary = os.path.join(EXTERNAL_RESULT_DIR, f".{request_id}.{os.getpid()}.tmp")
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump({"text": text, "ok": bool(ok), "delivered": bool(delivered),
+                       "ts": time.time()}, handle, ensure_ascii=False)
+        os.replace(temporary, target)
+    except OSError as exc:
+        print(f"could not write request result {request_id}: {exc}", flush=True)
 
 
 def _format_turn_footer(state, chat_id, ts, preserve_current_session=False):
@@ -262,7 +379,9 @@ def _deliver_turn_result(
 
     process_rich_text = None
     if log_lines:
-        MAIN_BUDGET = 30000
+        # Leaves room for the <details> wrapper under RICH_MAX_CHARS, so the
+        # process block never gets split across messages.
+        MAIN_BUDGET = 29500
         LAST_TOOL_RESERVE = 2000
         budget = MAIN_BUDGET + LAST_TOOL_RESERVE
         visible = []
@@ -283,9 +402,9 @@ def _deliver_turn_result(
             f"{body}\n</details>"
         )
 
+    with chat_procs_lock:
+        is_current_proc = chat_procs.get(chat_id, {}).get("proc") is proc
     if ts["current_session_id"]:
-        with chat_procs_lock:
-            is_current_proc = chat_procs.get(chat_id, {}).get("proc") is proc
         # A /new or /resume may already have detached this process while
         # its reader was draining the old stdout. That stale result must
         # not restore the session the command just replaced.
@@ -326,8 +445,6 @@ def _deliver_turn_result(
         )
         if footer:
             final_payload = f"{final_payload}\n\n{footer}"
-    if not stopped or delegated:
-        write_last_turn(telegram_chat_id, final_payload, delegated=delegated)
     if ts["progress_msg_id"] is not None and not progress_became_process_block:
         # Either there was no tool-call content at all (a plain
         # conversational turn), or there was but it already got absorbed
@@ -337,7 +454,7 @@ def _deliver_turn_result(
         # message (caught live 2026-08-28: that delete+resend was visibly
         # flickering -- the answer would flash as the progress message,
         # vanish, then reappear as a "new" one a beat later).
-        edit_rich(telegram_chat_id, ts["progress_msg_id"], final_payload)
+        edit_message_id = ts["progress_msg_id"]
     else:
         # A genuinely NEW message here is deliberate, not incidental: an
         # edit does not push a Telegram notification, a fresh sendMessage
@@ -346,7 +463,24 @@ def _deliver_turn_result(
         # message, which silently killed the "your answer is ready"
         # notification for every tool-using turn (the user only ever got
         # pinged by the initial "🤔 Думаю" placeholder, then nothing).
-        send_rich(telegram_chat_id, final_payload)
+        edit_message_id = None
+    # The final answer is persisted until Telegram acknowledges it, so a
+    # 429/network failure is retried later instead of silently losing it.
+    delivery = {
+        "chat_id": telegram_chat_id,
+        "text": final_payload,
+        "parts": split_rich_text(final_payload),
+        "next_part": 0,
+        "edit_message_id": edit_message_id,
+        "signal_last_turn": bool(not stopped or delegated),
+        "delegated": bool(delegated),
+        "stopped": bool(stopped),
+        "request_id": pop_delegate_request_id(state, chat_id) if delegated else None,
+        "attempts": 0,
+        "next_retry_at": time.time() + DELIVERY_FIRST_RETRY_S,
+    }
+    set_pending_delivery(state, chat_id, delivery)
+    deliver_pending_final(state, chat_id, delivery)
 
     if not stopped:
         attachments = list(ts["written_files"])
@@ -357,8 +491,12 @@ def _deliver_turn_result(
             if os.path.isfile(path):
                 send_attachment(telegram_chat_id, path)
 
+    if not is_current_proc:
+        # Same reason as the session guard above: a replaced process must not
+        # leave (or clear) an approval request in the session that replaced it.
+        return
     if ts["denials"] and prompt:
-        set_pending_prompt(state, chat_id, prompt)
+        set_pending_prompt(state, chat_id, prompt, session_id=get_session(state, chat_id))
         lines = ["🚫 **Заблокировано** (нужно разрешение):"]
         for d in ts["denials"][:10]:
             lines.append(f"`{d.get('tool_name', '?')}`  {json.dumps(d.get('tool_input', {}), ensure_ascii=False)[:150]}")

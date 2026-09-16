@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Updates this install to the latest push on the tracking branch. Safe to
-# re-run; does nothing destructive to local, untracked config (the bot's
-# token/owner id live in the generated systemd unit, not in any file this
-# touches).
+# Updates this install to the latest push on the tracking branch. The new
+# revision is checked out into a temporary worktree and must pass
+# scripts/run_tests.sh there first; only then is the working checkout
+# fast-forwarded. On any failure the working checkout is left untouched.
+# Restarting is not done here: /update schedules the usual deferred restart,
+# and a manual run should be followed by /restart (or systemctl restart).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,8 +18,34 @@ fi
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 git fetch origin "$BRANCH"
-git merge --ff-only "origin/$BRANCH"
+TARGET="origin/$BRANCH"
 
-python3 -m py_compile bridge.py runtime.py telegram_api.py state_store.py chat_process.py handlers.py telegram_format.py
+if [ "$(git rev-parse HEAD)" = "$(git rev-parse "$TARGET")" ]; then
+    echo "Already up to date at $(git rev-parse --short HEAD) on $BRANCH."
+    exit 0
+fi
+if ! git merge-base --is-ancestor HEAD "$TARGET"; then
+    echo "ERROR: $TARGET is not a fast-forward of the local checkout." >&2
+    exit 1
+fi
 
+CANDIDATE="$(mktemp -d)"
+cleanup() {
+    git worktree remove --force "$CANDIDATE" >/dev/null 2>&1 || rm -rf "$CANDIDATE"
+}
+trap cleanup EXIT
+git worktree add --detach "$CANDIDATE" "$TARGET" >/dev/null
+
+echo "Checking candidate $(git rev-parse --short "$TARGET")..."
+if [ -x "$CANDIDATE/scripts/run_tests.sh" ]; then
+    CHECK=("$CANDIDATE/scripts/run_tests.sh")
+else
+    CHECK=(bash -c "cd '$CANDIDATE' && python3 -m py_compile bridge.py runtime.py telegram_api.py state_store.py chat_process.py handlers.py telegram_format.py")
+fi
+if ! "${CHECK[@]}"; then
+    echo "ERROR: candidate $(git rev-parse --short "$TARGET") failed checks -- checkout left unchanged." >&2
+    exit 1
+fi
+
+git merge --ff-only "$TARGET"
 echo "Updated to $(git rev-parse --short HEAD) on $BRANCH."

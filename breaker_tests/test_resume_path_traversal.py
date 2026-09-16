@@ -56,7 +56,7 @@ os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxx
 os.environ["OWNER_ID"] = "1000000001"  # fake, unrelated to the real OWNER_ID
 os.environ["BRIDGE_STATE_FILE"] = os.path.join(_TMP, "state.json")
 
-sys.path.insert(0, os.path.expanduser("~/.claude-telegram-bridge"))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bridge  # noqa: E402  (must come after the env vars above)
 import telegram_api  # noqa: E402
 from runtime import account_dir  # noqa: E402

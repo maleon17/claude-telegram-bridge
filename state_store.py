@@ -233,10 +233,12 @@ def set_workspace(state, chat_id, path):
         save_state(state)
 
 
-def set_pending_prompt(state, chat_id, prompt):
+def set_pending_prompt(state, chat_id, prompt, session_id=None):
+    """Remember a denied prompt for /approve, bound to the session it ran in."""
     with state_lock:
         entry = state.setdefault(str(chat_id), {})
         entry["pending_prompt"] = prompt
+        entry["pending_prompt_session_id"] = session_id
         save_state(state)
 
 
@@ -244,12 +246,62 @@ def get_pending_prompt(state, chat_id):
     return state.get(str(chat_id), {}).get("pending_prompt")
 
 
+def pending_prompt_is_current(state, chat_id):
+    """False when the pending approval belongs to a session that is no longer
+    active (e.g. a late result from a process replaced by /new or /resume)."""
+    entry = state.get(str(chat_id), {})
+    if "pending_prompt_session_id" not in entry:
+        return True  # entries written before session binding existed
+    bound = entry.get("pending_prompt_session_id")
+    return not bound or bound == entry.get("session_id")
+
+
 def clear_pending_prompt(state, chat_id):
     with state_lock:
         entry = state.get(str(chat_id))
         if entry:
             entry.pop("pending_prompt", None)
+            entry.pop("pending_prompt_session_id", None)
             save_state(state)
+
+
+def set_delegate_request_id(state, chat_id, request_id):
+    with state_lock:
+        entry = state.setdefault(str(chat_id), {})
+        if request_id:
+            entry["delegate_request_id"] = request_id
+        else:
+            entry.pop("delegate_request_id", None)
+        save_state(state)
+
+
+def pop_delegate_request_id(state, chat_id):
+    with state_lock:
+        entry = state.get(str(chat_id)) or {}
+        request_id = entry.pop("delegate_request_id", None)
+        if request_id:
+            save_state(state)
+        return request_id
+
+
+def set_pending_delivery(state, chat_id, delivery):
+    with state_lock:
+        entry = state.setdefault(str(chat_id), {})
+        if delivery:
+            entry["pending_delivery"] = delivery
+        else:
+            entry.pop("pending_delivery", None)
+        save_state(state)
+
+
+def pending_deliveries(state):
+    """Snapshot of (state_key, delivery) for every final not yet acknowledged."""
+    with state_lock:
+        return [
+            (key, dict(entry["pending_delivery"]))
+            for key, entry in state.items()
+            if isinstance(entry, dict) and isinstance(entry.get("pending_delivery"), dict)
+        ]
 
 
 def get_account_status(state, chat_id):

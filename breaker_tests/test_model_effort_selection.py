@@ -14,7 +14,7 @@ os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxx
 os.environ["OWNER_ID"] = "1000000001"
 os.environ["BRIDGE_STATE_FILE"] = os.path.join(_TMP, "state.json")
 
-sys.path.insert(0, os.path.expanduser("~/.claude-telegram-bridge"))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import chat_process  # noqa: E402
 import handlers  # noqa: E402
 from state_store import get_effort, get_model, set_effort, set_model  # noqa: E402

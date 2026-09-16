@@ -15,6 +15,10 @@ from runtime import (
 )
 from telegram_format import format_message, strip_mdv2
 
+# Raw characters per plain edit: leaves room for MarkdownV2 escaping to grow
+# the text without hitting MAX_MSG_LEN.
+PLAIN_EDIT_CHUNK = 3000
+
 def _tg_rate_limited(response):
     return response.get("error_code") == 429
 
@@ -207,6 +211,13 @@ _whisper_model = None
 _whisper_lock = threading.Lock()
 
 
+def voice_transcription_available():
+    """faster-whisper is an optional dependency (see setup.sh)."""
+    import importlib.util
+
+    return importlib.util.find_spec("faster_whisper") is not None
+
+
 def transcribe_voice(path):
     """Local speech-to-text via faster-whisper. Lazy-loads the model on first
     use so bridge.py startup and non-voice messages pay no extra cost."""
@@ -241,8 +252,31 @@ def extract_existing_files(text):
 # ---------------------------------------------------------------------------
 
 
-def send_rich(chat_id, markdown_text, reply_to=None):
-    markdown_text = markdown_text[:RICH_MAX_CHARS]
+def split_rich_text(markdown_text, limit=RICH_MAX_CHARS):
+    """Split rich Markdown at line boundaries so no chunk exceeds ``limit``
+    and a fenced code block cut in two is closed and reopened, instead of
+    silently truncating everything past the Bot API cap."""
+    text = str(markdown_text or "")
+    if len(text) <= limit:
+        return [text]
+    parts, current, in_fence = [], "", False
+    step = max(1, limit - 8)
+    for line in text.splitlines(keepends=True):
+        pieces = [line[i:i + step] for i in range(0, len(line), step)] if len(line) > limit else [line]
+        for piece in pieces:
+            closing = "\n```" if in_fence else ""
+            if current and len(current) + len(piece) + len(closing) > limit:
+                parts.append((current.rstrip() + closing).rstrip())
+                current = "```\n" if in_fence else ""
+            current += piece
+            if piece.count("```") % 2:
+                in_fence = not in_fence
+    if current:
+        parts.append((current.rstrip() + ("\n```" if in_fence else "")).rstrip())
+    return parts
+
+
+def _send_rich_chunk(chat_id, markdown_text, reply_to=None):
     params = {"chat_id": chat_id, "rich_message": {"markdown": markdown_text}}
     if reply_to:
         params["reply_parameters"] = {"message_id": reply_to}
@@ -254,12 +288,25 @@ def send_rich(chat_id, markdown_text, reply_to=None):
     return r
 
 
+def send_rich(chat_id, markdown_text, reply_to=None):
+    """Send the whole text, split into as many rich messages as needed.
+    Returns the first failing result, or the last successful one."""
+    last = {"ok": True}
+    for index, chunk in enumerate(split_rich_text(markdown_text)):
+        last = _send_rich_chunk(chat_id, chunk, reply_to if index == 0 else None)
+        if not last or not last.get("ok"):
+            return last or {"ok": False}
+    return last
+
+
 def edit_rich(chat_id, message_id, markdown_text):
-    markdown_text = markdown_text[:RICH_MAX_CHARS]
+    """Edit the message into the first chunk; any overflow is sent as new
+    messages right after, so a long answer is never cut off."""
+    chunks = split_rich_text(markdown_text)
     params = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "rich_message": {"markdown": markdown_text},
+        "rich_message": {"markdown": chunks[0]},
     }
     r = tg_call("editMessageText", params)
     # A transient edit rate-limit must stay on this same message. Returning
@@ -276,9 +323,22 @@ def edit_rich(chat_id, message_id, markdown_text):
         if _tg_rate_limited(r):
             return r
         desc = str(r.get("description", ""))
-        if "not modified" in desc.lower():
+        if "not modified" not in desc.lower():
+            # Plain fallback: keep the edit within the MarkdownV2 message
+            # limit and carry the rest over as ordinary messages.
+            plain_head = chunks[0][:PLAIN_EDIT_CHUNK]
+            r = edit_message(chat_id, message_id, plain_head)
+            if not r.get("ok"):
+                return r
+            overflow = chunks[0][PLAIN_EDIT_CHUNK:]
+            if overflow:
+                r = send_message(chat_id, overflow)
+                if not r or not r.get("ok"):
+                    return r or {"ok": False}
+    for chunk in chunks[1:]:
+        r = send_rich(chat_id, chunk)
+        if not r.get("ok"):
             return r
-        return edit_message(chat_id, message_id, markdown_text)
     return r
 
 

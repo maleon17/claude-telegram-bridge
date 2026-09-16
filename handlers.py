@@ -1,4 +1,3 @@
-import glob
 import json
 import os
 import re
@@ -8,18 +7,22 @@ import time
 import traceback
 
 from runtime import (
-    BATCH_DEBOUNCE_S, CLAUDE_BIN, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir, batch_timers,
-    busy_chats, claude_env, load_whitelist, pending_batch_generations,
-    pending_batches, pending_batches_lock, pending_logins,
+    BATCH_DEBOUNCE_S, CLAUDE_BIN, DRAINING_TEXT, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir,
+    batch_timers, busy_chats, claude_env, draining, intake_lock, load_whitelist,
+    pending_batch_generations, pending_batches, pending_batches_lock, pending_logins,
 )
 from state_store import (
     clear_pending_prompt, clear_session, delegate_key, fetch_account_limits,
     get_account_status, get_effort, get_model, get_pending_prompt, get_permission_mode,
-    get_session, get_usage, get_workspace, list_sessions, projects_dir_for,
+    get_session, get_usage, get_workspace, list_sessions, pop_delegate_request_id,
+    projects_dir_for,
     request_restart, session_message_count, set_account_status, set_effort, set_model,
-    set_pending_delegator, set_permission_mode, set_session, set_workspace,
+    set_delegate_request_id, set_pending_delegator, set_permission_mode, set_session,
+    set_workspace,
 )
-from chat_process import _stop_chat_process, send_turn_to_chat_process, write_last_turn
+from chat_process import (
+    _stop_chat_process, send_turn_to_chat_process, write_last_turn, write_request_result,
+)
 from telegram_api import send_message, send_typing, tg_call
 from telegram_format import format_message
 
@@ -41,6 +44,7 @@ ALL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MODEL_PICKER_FAMILIES = ("opus", "sonnet", "fable", "haiku")
 
 PERMISSION_MODES = ("bypass", "default", "acceptEdits", "plan")
+SESSION_PREFIX_RE = re.compile(r"[0-9a-f][0-9a-f-]{0,35}")
 
 pending_batch_output_chats = {}
 
@@ -149,9 +153,14 @@ def process_key_for_command(chat_id, state):
     return chat_id
 
 
-def _delegate_error(chat_id, text):
+def _delegate_error(chat_id, text, request_id=None):
     send_message(chat_id, text)
-    write_last_turn(chat_id, text, delegated=True)
+    if request_id:
+        # Only the caller that made this request sees the rejection; another
+        # caller's in-flight delegation keeps its own result channel.
+        write_request_result(request_id, text, ok=False)
+    else:
+        write_last_turn(chat_id, text, delegated=True)
 
 COMMANDS = [
     ("new", "Начать новую сессию"),
@@ -190,6 +199,7 @@ def handle_command(chat_id, text, state, offset=None):
         # as reasonable given the user explicitly asked to start fresh.
         cancel_pending_batch(chat_id)
         _stop_chat_process(chat_id)
+        clear_pending_prompt(state, chat_id)
         clear_session(state, chat_id)
         send_message(chat_id, "Начинаю новую сессию.")
         return True
@@ -221,28 +231,39 @@ def handle_command(chat_id, text, state, offset=None):
         if not arg:
             send_message(chat_id, "Использование: /resume <session_id или префикс>")
             return True
-        # arg is untrusted (whitelisted-chat-controlled), and os.path.join
-        # silently discards pdir entirely if arg is absolute -- glob would
-        # then search anywhere the process can read. Resolve both to real
-        # paths and require the match to actually be a descendant of pdir
-        # before globbing, closing both the absolute-path and the ../
-        # traversal variant.
-        real_pdir = os.path.realpath(pdir)
-        candidate = os.path.realpath(os.path.join(real_pdir, arg))
-        if os.path.commonpath([real_pdir, candidate]) != real_pdir:
+        # arg is untrusted (whitelisted-chat-controlled). Session ids are
+        # UUIDs, so accept only a hex/dash prefix and match it against the
+        # directory listing -- no path joining or glob patterns built from
+        # user input at all.
+        wanted = arg.lower()
+        if not SESSION_PREFIX_RE.fullmatch(wanted):
             send_message(chat_id, f"Сессия {arg} не найдена.")
             return True
-        matches = glob.glob(f"{candidate}*.jsonl")
-        matches = [
-            m for m in matches
-            if os.path.commonpath([real_pdir, os.path.realpath(m)]) == real_pdir
-        ]
+        try:
+            names = os.listdir(pdir)
+        except OSError:
+            names = []
+        session_ids = sorted(
+            name[:-6] for name in names
+            if name.endswith(".jsonl") and os.path.isfile(os.path.join(pdir, name))
+        )
+        matches = [sid for sid in session_ids if sid.lower() == wanted]
+        if not matches:
+            matches = [sid for sid in session_ids if sid.lower().startswith(wanted)]
         if not matches:
             send_message(chat_id, f"Сессия {arg} не найдена.")
             return True
-        sid = os.path.basename(matches[0])[:-6]
+        if len(matches) > 1:
+            lines = [f"Префикс {arg} подходит к нескольким сессиям, уточни id:"]
+            lines.extend(f"`{sid}`" for sid in matches[:10])
+            if len(matches) > 10:
+                lines.append(f"…и ещё {len(matches) - 10}")
+            send_message(chat_id, "\n".join(lines))
+            return True
+        sid = matches[0]
         cancel_pending_batch(chat_id)
         _stop_chat_process(chat_id)  # see /new -- same reason
+        clear_pending_prompt(state, chat_id)
         set_session(state, chat_id, sid)
         send_message(chat_id, f"Продолжаю сессию {sid[:8]}.")
         return True
@@ -359,8 +380,8 @@ def handle_command(chat_id, text, state, offset=None):
                 "plan — только чтение, ничего не меняет",
             )
             return True
-        choice = arg.lower().strip()
-        if choice not in PERMISSION_MODES:
+        choice = {mode.lower(): mode for mode in PERMISSION_MODES}.get(arg.lower().strip())
+        if choice is None:
             send_message(chat_id, f"Неизвестный режим. Доступно: {', '.join(PERMISSION_MODES)}")
             return True
         set_permission_mode(state, chat_id, choice)
@@ -441,7 +462,7 @@ def handle_command(chat_id, text, state, offset=None):
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update.sh")
         try:
             result = subprocess.run(
-                [script], capture_output=True, text=True, timeout=120, check=False,
+                [script], capture_output=True, text=True, timeout=900, check=False,
             )
         except Exception as e:
             send_message(chat_id, f"❌ Не смог запустить update.sh: {e}")
@@ -505,7 +526,14 @@ def _run_turn_thread(
         send_message(output_chat_id or chat_id, error_text)
         if delegated:
             write_last_turn(output_chat_id or chat_id, error_text, delegated=True)
+            write_request_result(pop_delegate_request_id(state, chat_id), error_text, ok=False)
         busy_chats.discard(chat_id)
+
+
+def _refuse_while_draining(output_chat_id, delegated):
+    send_message(output_chat_id, DRAINING_TEXT)
+    if delegated:
+        write_last_turn(output_chat_id, DRAINING_TEXT, delegated=True, ok=False)
 
 
 def spawn_turn(
@@ -513,14 +541,35 @@ def spawn_turn(
     extra_env=None,
 ):
     """Run a turn in the background so the poll loop stays responsive to
-    /stop and other commands while `claude` is running."""
-    if chat_id in busy_chats:
+    /stop and other commands while `claude` is running. Returns True if the
+    turn was started."""
+    with intake_lock:
+        if draining.is_set():
+            refused, busy = True, False
+        else:
+            refused, busy = False, chat_id in busy_chats
+            if not busy:
+                busy_chats.add(chat_id)
+    if refused:
+        _refuse_while_draining(output_chat_id or chat_id, delegated)
+        return False
+    if busy:
         send_message(
             output_chat_id or chat_id,
             "Уже выполняю предыдущий запрос. Дождись ответа или используй /stop.",
         )
-        return
-    busy_chats.add(chat_id)
+        return False
+    _start_turn_thread(
+        chat_id, prompt, state, force_permission_mode=force_permission_mode,
+        output_chat_id=output_chat_id, delegated=delegated, extra_env=extra_env,
+    )
+    return True
+
+
+def _start_turn_thread(
+    chat_id, prompt, state, force_permission_mode=None, output_chat_id=None, delegated=False,
+    extra_env=None,
+):
     threading.Thread(
         target=_run_turn_thread,
         args=(chat_id, prompt, state),
@@ -536,7 +585,7 @@ def spawn_turn(
 
 def start_delegate_turn(
     chat_id, prompt, state, resume_session_id=None, workspace=None,
-    model_spec=None, effort_spec=None, env=None,
+    model_spec=None, effort_spec=None, env=None, request_id=None,
 ):
     """Start one isolated, persistent turn for bridge_exec.py.
 
@@ -553,15 +602,15 @@ def start_delegate_turn(
     try:
         requested_model = resolve_model_spec(model_spec) if model_requested else None
     except ValueError as exc:
-        _delegate_error(chat_id, str(exc))
+        _delegate_error(chat_id, str(exc), request_id)
         return False
 
     if delegate_process in busy_chats:
-        _delegate_error(chat_id, "Уже выполняю предыдущую делегированную задачу.")
+        _delegate_error(chat_id, "Уже выполняю предыдущую делегированную задачу.", request_id)
         return False
 
     if requested_session_id and requested_env:
-        _delegate_error(chat_id, "Нельзя использовать --env вместе с --resume.")
+        _delegate_error(chat_id, "Нельзя использовать --env вместе с --resume.", request_id)
         return False
 
     cancel_pending_batch(delegate_process)
@@ -578,7 +627,7 @@ def start_delegate_turn(
             resolve_effort_spec(final_model, effort_spec) if effort_requested else None
         )
     except ValueError as exc:
-        _delegate_error(chat_id, str(exc))
+        _delegate_error(chat_id, str(exc), request_id)
         return False
 
     if requested_session_id:
@@ -596,6 +645,7 @@ def start_delegate_turn(
                 chat_id,
                 "Нельзя продолжить эту делегацию: resume_session_id не совпадает "
                 "с последней сессией делегатора.",
+                request_id,
             )
             return False
         if workspace:
@@ -628,7 +678,8 @@ def start_delegate_turn(
     # the owner's pre-delegation session without ever overwriting the owner
     # entry when the delegate result arrives.
     set_pending_delegator(state, delegate_process, owner_session_id or "")
-    spawn_turn(
+    set_delegate_request_id(state, delegate_process, request_id)
+    started = spawn_turn(
         delegate_process,
         prompt,
         state,
@@ -636,7 +687,10 @@ def start_delegate_turn(
         delegated=True,
         extra_env=requested_env or None,
     )
-    return True
+    if not started:
+        refused_id = pop_delegate_request_id(state, delegate_process)
+        write_request_result(refused_id, "Делегированная задача не запущена.", ok=False)
+    return started
 
 
 # Forwarding a batch of messages (or just typing several in quick succession)
@@ -656,62 +710,66 @@ def cancel_pending_batch(chat_id):
 
 
 def _flush_pending_batch(chat_id, state, generation):
-    with pending_batches_lock:
-        if pending_batch_generations.get(chat_id) != generation:
+    # Taking the batch and reserving the chat happen under intake_lock, so a
+    # deferred restart can never observe the gap between them as "idle".
+    with intake_lock:
+        with pending_batches_lock:
+            if pending_batch_generations.get(chat_id) != generation:
+                return
+            prompts = pending_batches.pop(chat_id, [])
+            batch_timers.pop(chat_id, None)
+            output_chat_id = pending_batch_output_chats.pop(chat_id, None)
+            pending_batch_generations.pop(chat_id, None)
+        if not prompts:
             return
-        prompts = pending_batches.pop(chat_id, [])
-        batch_timers.pop(chat_id, None)
-        output_chat_id = pending_batch_output_chats.pop(chat_id, None)
-        pending_batch_generations.pop(chat_id, None)
+        refused = draining.is_set()
+        inject = not refused and chat_id in busy_chats
+        if not refused and not inject:
+            busy_chats.add(chat_id)
 
-    if not prompts:
+    delegated = output_chat_id is not None
+    if refused:
+        _refuse_while_draining(output_chat_id or chat_id, delegated=False)
         return
     combined = prompts[0] if len(prompts) == 1 else "\n\n---\n\n".join(prompts)
     try:
-        if chat_id in busy_chats:
-            if output_chat_id is None:
-                dispatch_turn(chat_id, combined, state)
-            else:
-                dispatch_turn(
-                    chat_id,
-                    combined,
-                    state,
-                    output_chat_id=output_chat_id,
-                    delegated=True,
-                )
+        if inject:
+            dispatch_turn(
+                chat_id, combined, state, output_chat_id=output_chat_id, delegated=delegated,
+            )
         else:
-            if output_chat_id is None:
-                spawn_turn(chat_id, combined, state)
-            else:
-                spawn_turn(
-                    chat_id,
-                    combined,
-                    state,
-                    output_chat_id=output_chat_id,
-                    delegated=True,
-                )
+            _start_turn_thread(
+                chat_id, combined, state, output_chat_id=output_chat_id, delegated=delegated,
+            )
     except Exception:
+        if not inject:
+            busy_chats.discard(chat_id)
         err = traceback.format_exc()[-1500:]
         print(err, flush=True)
         send_message(output_chat_id or chat_id, f"Ошибка моста:\n```\n{err}\n```")
 
 
 def queue_prompt(chat_id, prompt, state, output_chat_id=None):
-    with pending_batches_lock:
-        pending_batches.setdefault(chat_id, []).append(prompt)
-        if output_chat_id is not None:
-            pending_batch_output_chats[chat_id] = output_chat_id
-        generation = pending_batch_generations.get(chat_id, 0) + 1
-        pending_batch_generations[chat_id] = generation
-        old_timer = batch_timers.get(chat_id)
-        timer = threading.Timer(
-            BATCH_DEBOUNCE_S, _flush_pending_batch, args=(chat_id, state, generation)
-        )
-        timer.daemon = True
-        batch_timers[chat_id] = timer
+    with intake_lock:
+        if draining.is_set():
+            _refuse_while_draining(output_chat_id or chat_id, delegated=False)
+            return False
+        with pending_batches_lock:
+            pending_batches.setdefault(chat_id, []).append(prompt)
+            if output_chat_id is not None:
+                pending_batch_output_chats[chat_id] = output_chat_id
+            generation = pending_batch_generations.get(chat_id, 0) + 1
+            pending_batch_generations[chat_id] = generation
+            old_timer = batch_timers.get(chat_id)
+            timer = threading.Timer(
+                BATCH_DEBOUNCE_S, _flush_pending_batch, args=(chat_id, state, generation)
+            )
+            timer.daemon = True
+            batch_timers[chat_id] = timer
     if old_timer:
         old_timer.cancel()
     timer.start()
+    return True
 
 
 def route_prompt(chat_id, prompt, state):

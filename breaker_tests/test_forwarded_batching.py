@@ -15,7 +15,7 @@ os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxx
 os.environ["OWNER_ID"] = "1000000001"
 os.environ["BRIDGE_STATE_FILE"] = os.path.join(_TMP, "state.json")
 
-sys.path.insert(0, os.path.expanduser("~/.claude-telegram-bridge"))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bridge  # noqa: E402
 import handlers  # noqa: E402
 import runtime  # noqa: E402
@@ -69,10 +69,12 @@ def test_idle_messages_are_one_prompt():
     old_debounce = handlers.BATCH_DEBOUNCE_S
     events = []
     handlers.BATCH_DEBOUNCE_S = 0.03
-    handlers.spawn_turn = lambda chat_id, prompt, state: events.append(
+    # An idle batch reserves the chat and starts the turn thread directly
+    # (under intake_lock, so a deferred restart can't see a gap).
+    handlers._start_turn_thread = lambda chat_id, prompt, state, **kw: events.append(
         ("spawn", chat_id, prompt)
     )
-    handlers.dispatch_turn = lambda chat_id, prompt, state: events.append(
+    handlers.dispatch_turn = lambda chat_id, prompt, state, **kw: events.append(
         ("dispatch", chat_id, prompt)
     )
     try:
@@ -80,6 +82,7 @@ def test_idle_messages_are_one_prompt():
         handlers.queue_prompt("idle", "второе", {})
         _wait_for_events(events, 1)
         assert events == [("spawn", "idle", "первое\n\n---\n\nвторое")]
+        assert "idle" in handlers.busy_chats
         print("[3/4] idle burst is one fresh prompt")
     finally:
         handlers.BATCH_DEBOUNCE_S = old_debounce
@@ -91,10 +94,12 @@ def test_busy_messages_are_one_injection():
     old_debounce = handlers.BATCH_DEBOUNCE_S
     events = []
     handlers.BATCH_DEBOUNCE_S = 0.03
-    handlers.spawn_turn = lambda chat_id, prompt, state: events.append(
+    # An idle batch reserves the chat and starts the turn thread directly
+    # (under intake_lock, so a deferred restart can't see a gap).
+    handlers._start_turn_thread = lambda chat_id, prompt, state, **kw: events.append(
         ("spawn", chat_id, prompt)
     )
-    handlers.dispatch_turn = lambda chat_id, prompt, state: events.append(
+    handlers.dispatch_turn = lambda chat_id, prompt, state, **kw: events.append(
         ("dispatch", chat_id, prompt)
     )
     handlers.busy_chats.add("busy")

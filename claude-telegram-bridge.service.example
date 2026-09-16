@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=simple
 User=__USER__
 WorkingDirectory=__INSTALL_DIR__
-Environment=PATH=/home/__USER__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=TELEGRAM_BOT_TOKEN=__BOT_TOKEN__
-Environment=OWNER_ID=__OWNER_ID__
-Environment=BRIDGE_WORKDIR=/home/__USER__
+Environment=PATH=__HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=BRIDGE_WORKDIR=__HOME__
+# TELEGRAM_BOT_TOKEN, OWNER_ID, SERVICE_NAME and CLAUDE_BIN live here, mode 600.
+EnvironmentFile=__ENV_FILE__
 ExecStart=/usr/bin/python3 __INSTALL_DIR__/bridge.py
 Restart=always
 RestartSec=3

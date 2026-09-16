@@ -22,20 +22,25 @@ import tempfile
 import threading
 import time
 import traceback
+from collections import deque
 
 from runtime import (
-    EXTERNAL_REQUEST_FILE, FILE_SEND_MAX_CAPTION_CHARS, FILE_SEND_QUEUE_DIR,
-    FILE_SEND_RESULT_DIR, MAX_DOCUMENT_BYTES, OWNER_ID, SERVICE_NAME,
-    WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset,
-    ensure_owner_mcp_config, load_whitelist, tenant_file_outbox,
+    DRAINING_TEXT, EXTERNAL_REQUEST_DIR, EXTERNAL_REQUEST_FILE, FILE_SEND_MAX_CAPTION_CHARS,
+    FILE_SEND_QUEUE_DIR,
+    FILE_SEND_RESULT_DIR, MAX_DOCUMENT_BYTES, OWNER_ID, RESTART_SIGNAL_FILE, SERVICE_NAME,
+    WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset, draining,
+    ensure_owner_mcp_config, intake_active, intake_lock, intake_queues, load_whitelist,
+    pending_batches, tenant_file_outbox,
 )
 from state_store import (
     clear_pending_prompt, get_account_status, get_pending_prompt, load_state,
+    pending_prompt_is_current,
     pop_pending_restart, pop_restart_request, set_pending_restart,
     set_permission_mode,
 )
 from chat_process import (
-    _chat_proc_idle_reaper_loop, _shutdown_chat_processes, _stop_chat_process,
+    _chat_proc_idle_reaper_loop, _pending_delivery_watcher_loop, _shutdown_chat_processes,
+    _stop_chat_process, write_request_result,
 )
 from handlers import (
     cancel_pending_batch, handle_callback_query, handle_command, handle_onboarding,
@@ -44,7 +49,7 @@ from handlers import (
 )
 from telegram_api import (
     download_telegram_file, edit_message, rich_message_to_markdown, send_message,
-    send_document, tg_call, transcribe_voice,
+    send_document, tg_call, transcribe_voice, voice_transcription_available,
 )
 
 
@@ -270,21 +275,40 @@ def _build_message_prompt(msg, text, caption, voice_text, attachment_note):
     return "\n\n".join(parts)
 
 
+def _bridge_is_idle():
+    """Nothing in flight: no turn, no debounced batch, no message still being
+    taken in. Callers hold intake_lock so the answer can't go stale before
+    draining starts."""
+    return not (
+        busy_chats
+        or pending_batches
+        or intake_active
+        or any(intake_queues.values())
+    )
+
+
 def _restart_watcher_loop(state):
     """Runs in its own thread, checked on its own clock (every 1s) instead
-    of piggybacking on the getUpdates cycle. That matters: if messages keep
-    arriving back-to-back, busy_chats can go empty and get re-populated by
-    the next message before the main loop ever gets back around to its own
-    post-batch check -- this thread catches the gap regardless of whether
-    a new message happens to land right after."""
+    of piggybacking on the getUpdates cycle. The idle check and switching
+    into draining happen atomically under intake_lock, so no message or
+    turn can be accepted in between; anything arriving afterwards gets an
+    explicit "restarting" reply instead of being lost."""
     while True:
         time.sleep(1)
-        if busy_chats:
+        if not os.path.exists(RESTART_SIGNAL_FILE):
             continue
-        restart_req = pop_restart_request()
-        if not restart_req:
-            continue
+        with intake_lock:
+            if not _bridge_is_idle():
+                continue
+            restart_req = pop_restart_request()
+            if not restart_req:
+                continue
+            draining.set()
         r_chat_id = restart_req["chat_id"]
+        if not SERVICE_NAME:
+            draining.clear()
+            send_message(r_chat_id, "❌ SERVICE_NAME не задан — перезапуск невозможен.")
+            continue
         rr = send_message(
             r_chat_id, "🔄 Идёт перезагрузка, ничего не делайте пока процесс не будет завершён...",
         )
@@ -302,7 +326,17 @@ def _restart_watcher_loop(state):
             chat_ids = list(chat_procs.keys())
         for cid in chat_ids:
             _stop_chat_process(cid)
-        subprocess.Popen(["sudo", "-n", "systemctl", "restart", SERVICE_NAME])
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "systemctl", "restart", SERVICE_NAME],
+                capture_output=True, text=True, timeout=90,
+            )
+            error = (result.stderr or result.stdout or "").strip() or f"код {result.returncode}"
+        except Exception as exc:
+            error = str(exc)
+        # Still alive: systemd did not restart us. Resume accepting work.
+        draining.clear()
+        send_message(r_chat_id, f"❌ Перезапуск не выполнен: {error[:500]}")
 
 
 def _external_request_watcher_loop(state):
@@ -318,36 +352,49 @@ def _external_request_watcher_loop(state):
     it is not allowed to reuse or steer the owner's process by default.
     Real human steering via Telegram is routed to that delegate process while
     it is busy, and otherwise continues to use the owner's process."""
+    os.makedirs(EXTERNAL_REQUEST_DIR, mode=0o700, exist_ok=True)
     while True:
         time.sleep(1)
-        if not os.path.exists(EXTERNAL_REQUEST_FILE):
-            continue
-        try:
-            with open(EXTERNAL_REQUEST_FILE, encoding="utf-8") as f:
-                request = json.load(f)
-        except Exception as exc:
-            print(f"Could not read external request: {exc}", flush=True)
-            request = None
-        try:
-            os.remove(EXTERNAL_REQUEST_FILE)
-        except FileNotFoundError:
-            pass
-        if not isinstance(request, dict):
-            continue
-        chat_id = request.get("chat_id") or OWNER_ID
-        text = request.get("text")
-        if not text:
-            continue
-        start_delegate_turn(
-            chat_id,
-            text,
-            state,
-            resume_session_id=request.get("resume_session_id"),
-            workspace=request.get("workspace"),
-            model_spec=request.get("model"),
-            effort_spec=request.get("effort"),
-            env=request.get("env"),
-        )
+        paths = glob.glob(os.path.join(EXTERNAL_REQUEST_DIR, "*.json"))
+        paths.sort(key=lambda path: (os.path.getmtime(path) if os.path.exists(path) else 0, path))
+        if os.path.exists(EXTERNAL_REQUEST_FILE):
+            paths.insert(0, EXTERNAL_REQUEST_FILE)
+        for path in paths:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    request = json.load(f)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                print(f"Could not read external request {path}: {exc}", flush=True)
+                request = None
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            request_id = (
+                os.path.splitext(os.path.basename(path))[0]
+                if path != EXTERNAL_REQUEST_FILE else None
+            )
+            if not isinstance(request, dict):
+                write_request_result(request_id, "Повреждённый запрос делегации.", ok=False)
+                continue
+            chat_id = request.get("chat_id") or OWNER_ID
+            text = request.get("text")
+            if not text:
+                write_request_result(request_id, "Пустой текст задачи.", ok=False)
+                continue
+            start_delegate_turn(
+                chat_id,
+                text,
+                state,
+                resume_session_id=request.get("resume_session_id"),
+                workspace=request.get("workspace"),
+                model_spec=request.get("model"),
+                effort_spec=request.get("effort"),
+                env=request.get("env"),
+                request_id=request_id,
+            )
 
 
 def _write_cross_delegate_result(request_id, ok, text):
@@ -521,6 +568,226 @@ def _wakeup_watcher_loop(state):
             spawn_turn(chat_id, prompt, state)
 
 
+def _process_message(msg, state):
+    """Everything for one incoming message that may be slow (whitelist,
+    commands, downloads, transcription, routing). Runs on the chat's intake
+    worker thread, never on the getUpdates thread."""
+    chat_id = msg["chat"]["id"]
+    user_id = msg.get("from", {}).get("id")
+    text = msg.get("text") or ""
+    photo = msg.get("photo")
+    document = msg.get("document")
+    voice = msg.get("voice")
+    caption = msg.get("caption") or ""
+    rich_message = msg.get("rich_message")
+    forwarded = _is_forwarded_message(msg)
+
+    if rich_message and not text:
+        try:
+            text = rich_message_to_markdown(rich_message)
+        except Exception:
+            print(traceback.format_exc()[-1500:], flush=True)
+
+    if (
+        not text and not caption and not photo and not document and not voice
+        and not rich_message and not _message_kind_note(msg) and not forwarded
+    ):
+        return
+
+    whitelist = load_whitelist()
+    onboarding_text = text or caption
+    if handle_onboarding(chat_id, user_id, onboarding_text, state, whitelist):
+        return
+
+    try:
+        # A bare "." or "/" becomes empty after removing the
+        # command prefix.  Guard the split so malformed/placeholder
+        # Telegram messages cannot abort this update cycle.
+        normalized_text = text.strip().lower().lstrip("/.")
+        cmd = normalized_text.split()[0] if normalized_text else ""
+
+        if cmd == "stop" and text.startswith(("/", ".")) and not forwarded:
+            # Interrupting a turn now means killing the whole
+            # persistent chat process, not just "this turn" (see
+            # chat_procs) -- the reader thread's own finally-block
+            # notices the stdout stream ended mid-turn and delivers
+            # the "⏹ Остановлено" message itself; this is just the
+            # immediate ack. Next message respawns fresh via
+            # --resume onto the same session, so nothing is lost.
+            target_key = process_key_for_incoming(chat_id)
+            cancel_pending_batch(target_key)
+            if target_key in busy_chats:
+                _stop_chat_process(target_key)
+                send_message(chat_id, "⏹ Прерываю текущий запрос...")
+            else:
+                send_message(chat_id, "Сейчас ничего не выполняется.")
+            return
+
+        if cmd == "approve" and text.startswith(("/", ".")) and not forwarded:
+            target_key = process_key_for_command(chat_id, state)
+            pending = get_pending_prompt(state, target_key)
+            if not pending:
+                send_message(chat_id, "Нет заблокированного действия для approve.")
+                return
+            if not pending_prompt_is_current(state, target_key):
+                clear_pending_prompt(state, target_key)
+                send_message(
+                    chat_id,
+                    "Заблокированное действие относится к прошлой сессии — "
+                    "повторять его в текущей не буду.",
+                )
+                return
+            arg = text.partition(" ")[2].strip().lower()
+            if arg == "session":
+                set_permission_mode(state, target_key, "bypass")
+                send_message(chat_id, "Bypass включён для этой сессии насовсем. Повторяю...")
+                clear_pending_prompt(state, target_key)
+                spawn_turn(
+                    target_key,
+                    pending,
+                    state,
+                    output_chat_id=chat_id if target_key != chat_id else None,
+                    delegated=target_key != chat_id,
+                )
+            else:
+                send_message(chat_id, "Разрешаю один раз. Повторяю...")
+                clear_pending_prompt(state, target_key)
+                spawn_turn(
+                    target_key,
+                    pending,
+                    state,
+                    force_permission_mode="bypass",
+                    output_chat_id=chat_id if target_key != chat_id else None,
+                    delegated=target_key != chat_id,
+                )
+            return
+
+        if cmd == "deny" and text.startswith(("/", ".")) and not forwarded:
+            target_key = process_key_for_command(chat_id, state)
+            if get_pending_prompt(state, target_key):
+                clear_pending_prompt(state, target_key)
+                send_message(chat_id, "Отклонено.")
+            else:
+                send_message(chat_id, "Нечего отклонять.")
+            return
+
+        if (
+            not photo and not document and not voice and text.startswith(("/", "."))
+            and not forwarded
+        ):
+            if handle_command(chat_id, text, state, offset=current_offset[0]):
+                return
+
+        attachment_note = ""
+        if photo:
+            largest = photo[-1]
+            local_path = download_telegram_file(chat_id, largest["file_id"])
+            if local_path:
+                attachment_note += f"\n\n[Прикреплено изображение: {local_path}]"
+            else:
+                send_message(chat_id, "Не удалось скачать изображение.")
+        if document:
+            local_path = download_telegram_file(
+                chat_id, document["file_id"], filename_hint=document.get("file_name")
+            )
+            if local_path:
+                attachment_note += f"\n\n[Прикреплён файл: {local_path}]"
+            else:
+                send_message(chat_id, "Не удалось скачать файл.")
+        voice_text = ""
+        if voice and not voice_transcription_available():
+            send_message(
+                chat_id,
+                "Голосовые сообщения не распознаются: на этой установке нет "
+                "faster-whisper (см. setup.sh). Напиши текстом.",
+            )
+            voice = None
+            if not (text.strip() or caption.strip() or photo or document):
+                return
+        if voice:
+            local_path = download_telegram_file(chat_id, voice["file_id"])
+            if local_path:
+                try:
+                    voice_text = transcribe_voice(local_path)
+                except Exception:
+                    print(traceback.format_exc()[-1500:], flush=True)
+                if not voice_text:
+                    send_message(chat_id, "Не удалось распознать голосовое сообщение.")
+            else:
+                send_message(chat_id, "Не удалось скачать голосовое сообщение.")
+
+        prompt = _build_message_prompt(
+            msg, text, caption, voice_text, attachment_note,
+        )
+        if not prompt:
+            return
+
+        route_prompt(chat_id, prompt, state)
+    except Exception:
+        err = traceback.format_exc()[-1500:]
+        print(err, flush=True)
+        send_message(chat_id, f"Ошибка моста:\n```\n{err}\n```")
+
+
+def _is_urgent_stop(msg, state):
+    """/stop from a ready, whitelisted chat is answered on the polling thread
+    right away, even while that chat's intake worker is busy downloading or
+    transcribing an earlier message."""
+    text = (msg.get("text") or "").strip()
+    if not text.startswith(("/", ".")) or _is_forwarded_message(msg):
+        return False
+    normalized = text.lower().lstrip("/.")
+    if (normalized.split() or [""])[0].split("@", 1)[0] != "stop":
+        return False
+    user_id = msg.get("from", {}).get("id")
+    return (
+        str(user_id) in load_whitelist()
+        and get_account_status(state, msg["chat"]["id"]) == "ready"
+    )
+
+
+def _handle_urgent_stop(chat_id):
+    # Interrupting a turn means killing the whole persistent chat process,
+    # not just "this turn" (see chat_procs) -- the reader thread's own
+    # finally-block delivers the "⏹ Остановлено" message itself; this is just
+    # the immediate ack. Next message respawns fresh via --resume onto the
+    # same session, so nothing is lost.
+    target_key = process_key_for_incoming(chat_id)
+    cancel_pending_batch(target_key)
+    if target_key in busy_chats:
+        _stop_chat_process(target_key)
+        send_message(chat_id, "⏹ Прерываю текущий запрос...")
+    else:
+        send_message(chat_id, "Сейчас ничего не выполняется.")
+
+
+def _enqueue_intake(msg, state):
+    """Caller holds intake_lock. Messages of one chat are processed strictly
+    in arrival order by a single worker; different chats run in parallel."""
+    chat_id = msg["chat"]["id"]
+    intake_queues.setdefault(chat_id, deque()).append(msg)
+    if chat_id not in intake_active:
+        intake_active.add(chat_id)
+        threading.Thread(target=_intake_worker, args=(chat_id, state), daemon=True).start()
+
+
+def _intake_worker(chat_id, state):
+    while True:
+        with intake_lock:
+            queue = intake_queues.get(chat_id)
+            if not queue:
+                intake_queues.pop(chat_id, None)
+                intake_active.discard(chat_id)
+                return
+            msg = queue.popleft()
+        try:
+            _process_message(msg, state)
+        except Exception:
+            err = traceback.format_exc()[-1500:]
+            print(err, flush=True)
+            send_message(chat_id, f"Ошибка моста:\n```\n{err}\n```")
+
+
 def main():
     try:
         ensure_owner_mcp_config()
@@ -549,6 +816,7 @@ def main():
     threading.Thread(target=_file_send_watcher_loop, daemon=True).start()
     threading.Thread(target=_wakeup_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_chat_proc_idle_reaper_loop, daemon=True).start()
+    threading.Thread(target=_pending_delivery_watcher_loop, args=(state,), daemon=True).start()
 
     while True:
         try:
@@ -584,144 +852,20 @@ def main():
             msg = update.get("message")
             if not msg:
                 continue
-            chat_id = msg["chat"]["id"]
-            user_id = msg.get("from", {}).get("id")
-            text = msg.get("text") or ""
-            photo = msg.get("photo")
-            document = msg.get("document")
-            voice = msg.get("voice")
-            caption = msg.get("caption") or ""
-            rich_message = msg.get("rich_message")
-            forwarded = _is_forwarded_message(msg)
-
-            if rich_message and not text:
-                try:
-                    text = rich_message_to_markdown(rich_message)
-                except Exception:
-                    print(traceback.format_exc()[-1500:], flush=True)
-
-            if (
-                not text and not caption and not photo and not document and not voice
-                and not rich_message and not _message_kind_note(msg) and not forwarded
-            ):
-                continue
-
-            whitelist = load_whitelist()
-            onboarding_text = text or caption
-            if handle_onboarding(chat_id, user_id, onboarding_text, state, whitelist):
-                continue
-
-            try:
-                # A bare "." or "/" becomes empty after removing the
-                # command prefix.  Guard the split so malformed/placeholder
-                # Telegram messages cannot abort this update cycle.
-                normalized_text = text.strip().lower().lstrip("/.")
-                cmd = normalized_text.split()[0] if normalized_text else ""
-
-                if cmd == "stop" and text.startswith(("/", ".")) and not forwarded:
-                    # Interrupting a turn now means killing the whole
-                    # persistent chat process, not just "this turn" (see
-                    # chat_procs) -- the reader thread's own finally-block
-                    # notices the stdout stream ended mid-turn and delivers
-                    # the "⏹ Остановлено" message itself; this is just the
-                    # immediate ack. Next message respawns fresh via
-                    # --resume onto the same session, so nothing is lost.
-                    target_key = process_key_for_incoming(chat_id)
-                    cancel_pending_batch(target_key)
-                    if target_key in busy_chats:
-                        _stop_chat_process(target_key)
-                        send_message(chat_id, "⏹ Прерываю текущий запрос...")
+            urgent_stop = _is_urgent_stop(msg, state)
+            with intake_lock:
+                refused = draining.is_set()
+                if not refused:
+                    if urgent_stop:
+                        # Messages still queued behind /stop are dropped, the
+                        # same way /stop drops a pending debounce batch.
+                        intake_queues.pop(msg["chat"]["id"], None)
                     else:
-                        send_message(chat_id, "Сейчас ничего не выполняется.")
-                    continue
-
-                if cmd == "approve" and text.startswith(("/", ".")) and not forwarded:
-                    target_key = process_key_for_command(chat_id, state)
-                    pending = get_pending_prompt(state, target_key)
-                    if not pending:
-                        send_message(chat_id, "Нет заблокированного действия для approve.")
-                        continue
-                    arg = text.partition(" ")[2].strip().lower()
-                    if arg == "session":
-                        set_permission_mode(state, target_key, "bypass")
-                        send_message(chat_id, "Bypass включён для этой сессии насовсем. Повторяю...")
-                        clear_pending_prompt(state, target_key)
-                        spawn_turn(
-                            target_key,
-                            pending,
-                            state,
-                            output_chat_id=chat_id if target_key != chat_id else None,
-                            delegated=target_key != chat_id,
-                        )
-                    else:
-                        send_message(chat_id, "Разрешаю один раз. Повторяю...")
-                        clear_pending_prompt(state, target_key)
-                        spawn_turn(
-                            target_key,
-                            pending,
-                            state,
-                            force_permission_mode="bypass",
-                            output_chat_id=chat_id if target_key != chat_id else None,
-                            delegated=target_key != chat_id,
-                        )
-                    continue
-
-                if cmd == "deny" and text.startswith(("/", ".")) and not forwarded:
-                    target_key = process_key_for_command(chat_id, state)
-                    if get_pending_prompt(state, target_key):
-                        clear_pending_prompt(state, target_key)
-                        send_message(chat_id, "Отклонено.")
-                    else:
-                        send_message(chat_id, "Нечего отклонять.")
-                    continue
-
-                if (
-                    not photo and not document and not voice and text.startswith(("/", "."))
-                    and not forwarded
-                ):
-                    if handle_command(chat_id, text, state, offset=offset):
-                        continue
-
-                attachment_note = ""
-                if photo:
-                    largest = photo[-1]
-                    local_path = download_telegram_file(chat_id, largest["file_id"])
-                    if local_path:
-                        attachment_note += f"\n\n[Прикреплено изображение: {local_path}]"
-                    else:
-                        send_message(chat_id, "Не удалось скачать изображение.")
-                if document:
-                    local_path = download_telegram_file(
-                        chat_id, document["file_id"], filename_hint=document.get("file_name")
-                    )
-                    if local_path:
-                        attachment_note += f"\n\n[Прикреплён файл: {local_path}]"
-                    else:
-                        send_message(chat_id, "Не удалось скачать файл.")
-                voice_text = ""
-                if voice:
-                    local_path = download_telegram_file(chat_id, voice["file_id"])
-                    if local_path:
-                        try:
-                            voice_text = transcribe_voice(local_path)
-                        except Exception:
-                            print(traceback.format_exc()[-1500:], flush=True)
-                        if not voice_text:
-                            send_message(chat_id, "Не удалось распознать голосовое сообщение.")
-                    else:
-                        send_message(chat_id, "Не удалось скачать голосовое сообщение.")
-
-                prompt = _build_message_prompt(
-                    msg, text, caption, voice_text, attachment_note,
-                )
-                if not prompt:
-                    continue
-
-                route_prompt(chat_id, prompt, state)
-            except Exception:
-                err = traceback.format_exc()[-1500:]
-                print(err, flush=True)
-                send_message(chat_id, f"Ошибка моста:\n```\n{err}\n```")
+                        _enqueue_intake(msg, state)
+            if refused:
+                send_message(msg["chat"]["id"], DRAINING_TEXT)
+            elif urgent_stop:
+                _handle_urgent_stop(msg["chat"]["id"])
 
 
 if __name__ == "__main__":

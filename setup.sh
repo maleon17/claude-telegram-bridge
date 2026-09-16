@@ -7,10 +7,15 @@
 #     NOT automated -- it's an interactive browser OAuth flow, run it
 #     yourself first if needed)
 #   - asks for your bot token / Telegram ID / install directory
-#   - generates a systemd unit from claude-telegram-bridge.service.example
-#     and installs it as a system service
+#   - writes bridge.env (bot token, owner id, service name, claude path;
+#     mode 600) and a systemd unit from claude-telegram-bridge.service.example
+#     that reads it, then installs the unit as a system service
+#   - installs a sudoers rule allowing only `systemctl restart <service>`,
+#     which /restart and /update need
+#   - optionally installs faster-whisper for voice messages
 #
-# Safe to re-run: it only overwrites the generated unit file, nothing else.
+# Safe to re-run: it only overwrites bridge.env, the generated unit and
+# its sudoers rule.
 
 set -euo pipefail
 
@@ -68,33 +73,76 @@ fi
 
 read -rp "Service name [claude-telegram-bridge]: " SERVICE_NAME
 SERVICE_NAME="${SERVICE_NAME:-claude-telegram-bridge}"
+SERVICE_NAME="${SERVICE_NAME%.service}"
+if ! [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$ ]]; then
+    echo "Service name may only contain letters, digits, '_', '.', '@' and '-'."
+    exit 1
+fi
 
 INSTALL_USER="$(whoami)"
+INSTALL_HOME="$HOME"
 INSTALL_DIR="$SCRIPT_DIR"
+ENV_FILE="$INSTALL_DIR/bridge.env"
+SYSTEMCTL_BIN="$(command -v systemctl)"
 
 echo
 echo "Will install as systemd service '$SERVICE_NAME', running as user '$INSTALL_USER',"
-echo "from '$INSTALL_DIR'."
+echo "from '$INSTALL_DIR'. Secrets go to $ENV_FILE (mode 600), not into the unit."
 read -rp "Continue? [y/N] " CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
     echo "Aborted."
     exit 0
 fi
 
-# --- generate + install the unit ----------------------------------------
+# --- optional: local voice transcription ---------------------------------
 
-UNIT_FILE="/tmp/${SERVICE_NAME}.service"
+if python3 -c "import faster_whisper" >/dev/null 2>&1; then
+    echo "faster-whisper is installed: voice messages will be transcribed."
+else
+    read -rp "Install faster-whisper for voice messages (optional, large download)? [y/N] " VOICE
+    if [[ "$VOICE" =~ ^[Yy]$ ]]; then
+        python3 -m pip install --user faster-whisper \
+            || echo "faster-whisper install failed -- voice messages will get an explanatory reply instead."
+    else
+        echo "Skipping: voice messages will get an explanatory reply instead of a transcript."
+    fi
+fi
+
+# --- generate + install the environment file, unit and sudoers rule -------
+
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+umask 077
+{
+    printf 'TELEGRAM_BOT_TOKEN=%s\n' "$BOT_TOKEN"
+    printf 'OWNER_ID=%s\n' "$OWNER_ID"
+    printf 'SERVICE_NAME=%s.service\n' "$SERVICE_NAME"
+    printf 'CLAUDE_BIN=%s\n' "$CLAUDE_BIN"
+} > "$WORK_DIR/bridge.env"
+install -m 600 "$WORK_DIR/bridge.env" "$ENV_FILE"
+umask 022
+
 sed \
     -e "s|__USER__|${INSTALL_USER}|g" \
+    -e "s|__HOME__|${INSTALL_HOME}|g" \
     -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
-    -e "s|__BOT_TOKEN__|${BOT_TOKEN}|g" \
-    -e "s|__OWNER_ID__|${OWNER_ID}|g" \
-    claude-telegram-bridge.service.example > "$UNIT_FILE"
+    -e "s|__ENV_FILE__|${ENV_FILE}|g" \
+    claude-telegram-bridge.service.example > "$WORK_DIR/unit.service"
+
+# /restart and /update restart the service through `sudo -n`; allow exactly
+# that one command, nothing else.
+printf '%s ALL=(root) NOPASSWD: %s restart %s.service\n' \
+    "$INSTALL_USER" "$SYSTEMCTL_BIN" "$SERVICE_NAME" > "$WORK_DIR/sudoers"
+if ! visudo -cf "$WORK_DIR/sudoers" >/dev/null 2>&1 && ! sudo visudo -cf "$WORK_DIR/sudoers" >/dev/null; then
+    echo "Generated sudoers rule failed validation -- not installing it."
+    exit 1
+fi
 
 echo
-echo "Generated unit at $UNIT_FILE -- installing (requires sudo):"
-sudo cp "$UNIT_FILE" "/etc/systemd/system/${SERVICE_NAME}.service"
-rm -f "$UNIT_FILE"
+echo "Installing unit and sudoers rule (requires sudo):"
+sudo install -m 644 -o root -g root "$WORK_DIR/unit.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+sudo install -m 440 -o root -g root "$WORK_DIR/sudoers" "/etc/sudoers.d/${SERVICE_NAME//./_}-restart"
 sudo systemctl daemon-reload
 sudo systemctl enable --now "${SERVICE_NAME}.service"
 

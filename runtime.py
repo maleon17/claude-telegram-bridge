@@ -84,6 +84,17 @@ CHAT_PROC_IDLE_TIMEOUT_S = 6 * 3600
 # chat_ids with a turn currently in flight (guards against overlapping
 # --resume calls onto the same session).
 busy_chats = set()
+# Deferred restart (see _restart_watcher_loop): once `draining` is set no new
+# turn or message is accepted. `intake_lock` makes "is the bridge idle?" +
+# "start draining" atomic relative to accepting a message or starting a turn.
+draining = threading.Event()
+intake_lock = threading.RLock()
+DRAINING_TEXT = "🔄 Бот перезапускается — повтори сообщение через минуту."
+# Per-chat serial processing of incoming messages (downloads, transcription,
+# commands) off the getUpdates thread: chat_id -> deque of messages, plus the
+# set of chats whose intake worker is currently running.
+intake_queues = {}
+intake_active = set()
 # Mutable box so the restart-watcher background thread (see
 # _restart_watcher_loop) can read main()'s current getUpdates offset
 # without needing it passed in explicitly.
@@ -113,6 +124,15 @@ EXTERNAL_REQUEST_FILE = os.environ.get(
         os.path.dirname(os.path.abspath(STATE_FILE)),
         f"external_request_{STATE_INSTANCE_NAME}.json",
     ),
+)
+# bridge_exec.py writes one file per request here (keyed by a unique
+# request_id) and waits for the matching file in EXTERNAL_RESULT_DIR, so
+# concurrent callers can never overwrite or read each other's request/result.
+# EXTERNAL_REQUEST_FILE is still accepted as a legacy single-request channel.
+EXTERNAL_REQUEST_DIR = EXTERNAL_REQUEST_FILE + ".d"
+EXTERNAL_RESULT_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(STATE_FILE)),
+    f"external_result_{STATE_INSTANCE_NAME}.d",
 )
 ACCOUNTS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(STATE_FILE)), "accounts"

@@ -51,10 +51,15 @@ import threading
 import time
 import uuid
 
-REAL_CMD_QUEUE_PATH = os.path.expanduser("~/.hermes/scripts/cmd_queue.py")
+from _checkouts import CLAUDE_JARVIS_DIR, require
+
+# The live jarvis-ask-cmd-queue.service runs this canonical file; the old
+# ~/.hermes/scripts copy is a dead leftover and must not be tested instead.
+REAL_CMD_QUEUE_PATH = os.path.join(CLAUDE_JARVIS_DIR, "cmd_queue.py")
 
 
 def _load_real_queue_handler():
+    require(REAL_CMD_QUEUE_PATH)
     with open(REAL_CMD_QUEUE_PATH) as f:
         source = f.read()
 
@@ -62,7 +67,7 @@ def _load_real_queue_handler():
     # `if __name__ == "__main__":`, so executing it under a test-only module
     # name imports the actual Queue handler without binding the live 9092
     # port. Every line of handler logic remains the real shipped code.
-    ns = {"__name__": "cmd_queue_under_test"}
+    ns = {"__name__": "cmd_queue_under_test", "__file__": REAL_CMD_QUEUE_PATH}
     exec(compile(source, REAL_CMD_QUEUE_PATH, "exec"), ns)
     return ns["Queue"], ns["ThreadingHTTPServer"]
 

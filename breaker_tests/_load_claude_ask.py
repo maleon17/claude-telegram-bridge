@@ -1,4 +1,4 @@
-"""Helper: import the REAL, unmodified ~/.claude-telegram-bridge/jarvis-ask/claude_ask.py
+"""Helper: import the REAL, unmodified claude_ask.py from the canonical claude-jarvis checkout
 as a live Python module, by stubbing out its Hikka/herokutl framework
 dependencies (which aren't installed in this sandbox and aren't safe/possible
 to install here). This does NOT copy or modify claude_ask.py -- it loads the
@@ -15,7 +15,9 @@ import os
 import sys
 import types
 
-REAL_CLAUDE_ASK_PATH = "/home/mishin/claude-jarvis/claude_ask.py"
+from _checkouts import CLAUDE_JARVIS_DIR, require
+
+REAL_CLAUDE_ASK_PATH = os.path.join(CLAUDE_JARVIS_DIR, "claude_ask.py")
 
 
 def _install_fake_herokutl():
@@ -51,7 +53,8 @@ def _install_fake_herokutl():
     types_mod = types.ModuleType("herokutl.tl.types")
     for name in (
         "MessageEntityUrl", "MessageEntityTextUrl", "Channel",
-        "ChannelParticipantsAdmins", "Message",
+        "ChannelParticipantsAdmins", "Message", "UpdateEditMessage",
+        "UpdateEditChannelMessage",
     ):
         setattr(types_mod, name, _make_stub(name))
 
@@ -99,6 +102,7 @@ def _install_fake_hikka_package():
     loader_mod.command = _identity_decorator_factory
     loader_mod.loop = _identity_decorator_factory
     loader_mod.watcher = _identity_decorator_factory
+    loader_mod.raw_handler = _identity_decorator_factory
 
     class _Validators:
         pass
@@ -111,6 +115,7 @@ def _install_fake_hikka_package():
         return None
 
     utils_mod.asset_forum_topic = _stub_async
+    utils_mod.asset_channel = _stub_async
     utils_mod.get_args_raw = lambda message: (getattr(message, "raw_text", "") or "").split(maxsplit=1)[-1] if getattr(message, "raw_text", "") else ""
     utils_mod.get_args = lambda message: []
     utils_mod.answer = _stub_async
@@ -134,6 +139,7 @@ def _install_fake_hikka_package():
 def load_real_claude_ask_module():
     """Returns the real claude_ask module object (its ClaudeAsk class is the
     actual shipped implementation, unmodified) with framework deps stubbed."""
+    require(REAL_CLAUDE_ASK_PATH)
     _install_fake_herokutl()
     _install_fake_hikka_package()
 
