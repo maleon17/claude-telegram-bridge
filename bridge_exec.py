@@ -17,7 +17,7 @@ product for free -- only the INPUT side bypasses Telegram now.
 
 Usage:
     bridge_exec.py [--workspace PATH] [--resume ID] [--chat-id ID]
-                    [--timeout SECONDS] [--model "family [version]"]
+                    [--timeout SECONDS] [--model MODEL] [--effort LEVEL]
                     [--env KEY=VALUE ...] PROMPT...
 
 Every call through this script is a delegated turn by definition, so the
@@ -107,7 +107,11 @@ def main():
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument(
         "--model",
-        help="select a Claude model family and optional version, e.g. 'opus 4.7' or default",
+        help="select a Claude model, e.g. 'opus 4.7', claude-sonnet-5, or default",
+    )
+    parser.add_argument(
+        "--effort",
+        help="select reasoning effort (low, medium, high, xhigh, max, or default)",
     )
     parser.add_argument(
         "--env",
@@ -185,6 +189,8 @@ def main():
         request["resume_session_id"] = args.resume
     if model_spec is not None:
         request["model"] = model_spec
+    if args.effort is not None:
+        request["effort"] = args.effort
     if requested_env:
         request["env"] = requested_env
     # Every request through this file channel is a delegated one by

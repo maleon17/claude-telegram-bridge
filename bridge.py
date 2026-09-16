@@ -345,6 +345,7 @@ def _external_request_watcher_loop(state):
             resume_session_id=request.get("resume_session_id"),
             workspace=request.get("workspace"),
             model_spec=request.get("model"),
+            effort_spec=request.get("effort"),
             env=request.get("env"),
         )
 

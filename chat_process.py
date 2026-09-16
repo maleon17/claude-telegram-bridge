@@ -674,12 +674,12 @@ def _chat_reader_loop(chat_id, state, record):
             proc.kill()
 
 
-def _chat_process_signature(model, permission_mode, workspace, config_dir):
-    return (model, permission_mode, workspace, config_dir)
+def _chat_process_signature(model, effort, permission_mode, workspace, config_dir):
+    return (model, effort, permission_mode, workspace, config_dir)
 
 
 def _start_chat_process(
-    chat_id, model, permission_mode, workspace, config_dir, session_id, state,
+    chat_id, model, effort, permission_mode, workspace, config_dir, session_id, state,
     output_chat_id=None, delegated=False, extra_env=None,
 ):
     telegram_chat_id = chat_id if output_chat_id is None else output_chat_id
@@ -699,6 +699,8 @@ def _start_chat_process(
         args.append(f"--resume={session_id}")
     if model:
         args.append(f"--model={model}")
+    if effort:
+        args.append(f"--effort={effort}")
 
     proc = subprocess.Popen(
         args,
@@ -712,7 +714,7 @@ def _start_chat_process(
     )
     record = {
         "proc": proc,
-        "signature": _chat_process_signature(model, permission_mode, workspace, config_dir),
+        "signature": _chat_process_signature(model, effort, permission_mode, workspace, config_dir),
         "last_activity": time.time(),
         "original_prompt": None,
         "write_lock": threading.Lock(),
@@ -750,16 +752,16 @@ def _stop_chat_process(chat_id):
 
 
 def _ensure_chat_process(
-    chat_id, model, permission_mode, workspace, config_dir, state,
+    chat_id, model, effort, permission_mode, workspace, config_dir, state,
     output_chat_id=None, delegated=False, extra_env=None,
 ):
     """Returns a live process record for chat_id, starting or restarting
     one if needed. A restart is needed if there's no process yet, the
-    previous one died, or /model, /mode, or /workspace changed since it
+    previous one died, or /model, /effort, /mode, or /workspace changed since it
     was started (those are CLI flags, fixed for a process's lifetime --
     changing them means killing and respawning with --resume onto the
     same session so only the flags change, not the conversation)."""
-    wanted_sig = _chat_process_signature(model, permission_mode, workspace, config_dir)
+    wanted_sig = _chat_process_signature(model, effort, permission_mode, workspace, config_dir)
     with chat_procs_lock:
         record = chat_procs.get(chat_id)
     if (
@@ -775,6 +777,7 @@ def _ensure_chat_process(
     return _start_chat_process(
         chat_id,
         model,
+        effort,
         permission_mode,
         workspace,
         config_dir,
@@ -787,7 +790,7 @@ def _ensure_chat_process(
 
 
 def send_turn_to_chat_process(
-    chat_id, prompt, state, model=None, permission_mode=None, workspace=None, config_dir=None,
+    chat_id, prompt, state, model=None, effort=None, permission_mode=None, workspace=None, config_dir=None,
     output_chat_id=None, delegated=False, extra_env=None,
 ):
     """Non-blocking: ensures chat_id's persistent process is up (spawning
@@ -804,6 +807,7 @@ def send_turn_to_chat_process(
     record = _ensure_chat_process(
         chat_id,
         model,
+        effort,
         permission_mode,
         workspace,
         config_dir,

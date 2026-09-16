@@ -188,6 +188,22 @@ def set_model(state, chat_id, model):
         save_state(state)
 
 
+def get_effort(state, chat_id):
+    """Return the optional Claude reasoning effort for this chat."""
+    return state.get(str(chat_id), {}).get("effort")
+
+
+def set_effort(state, chat_id, effort):
+    """Persist an effort override; None leaves the CLI default in effect."""
+    with state_lock:
+        entry = state.setdefault(str(chat_id), {})
+        if effort:
+            entry["effort"] = effort
+        else:
+            entry.pop("effort", None)
+        save_state(state)
+
+
 def get_permission_mode(state, chat_id):
     """None means bypass (current default behavior, unchanged)."""
     return state.get(str(chat_id), {}).get("permission_mode")

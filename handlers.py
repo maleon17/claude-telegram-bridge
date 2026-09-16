@@ -14,46 +14,125 @@ from runtime import (
 )
 from state_store import (
     clear_pending_prompt, clear_session, delegate_key, fetch_account_limits,
-    get_account_status, get_model, get_pending_prompt, get_permission_mode,
+    get_account_status, get_effort, get_model, get_pending_prompt, get_permission_mode,
     get_session, get_usage, get_workspace, list_sessions, projects_dir_for,
-    request_restart, session_message_count, set_account_status, set_model,
+    request_restart, session_message_count, set_account_status, set_effort, set_model,
     set_pending_delegator, set_permission_mode, set_session, set_workspace,
 )
 from chat_process import _stop_chat_process, send_turn_to_chat_process, write_last_turn
 from telegram_api import send_message, send_typing, tg_call
 from telegram_format import format_message
 
-MODEL_VERSIONS = {
-    "opus": ["4.5", "4.6", "4.7", "4.8", "5"],
-    "sonnet": ["4.5", "4.6", "5"],
-    "haiku": ["4.5"],
-    "fable": ["5"],
-}
-MODEL_ALIASES = tuple(MODEL_VERSIONS.keys())
+MODEL_CATALOG = [
+    {"id": "claude-fable-5", "name": "Fable 5", "family": "fable", "version": "5", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-fable-5-1", "name": "Fable 5.1", "family": "fable", "version": "5.1", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-opus-4-5", "name": "Opus 4.5", "family": "opus", "version": "4.5", "efforts": ("low", "medium", "high")},
+    {"id": "claude-opus-4-6", "name": "Opus 4.6", "family": "opus", "version": "4.6", "efforts": ("low", "medium", "high", "max")},
+    {"id": "claude-opus-4-7", "name": "Opus 4.7", "family": "opus", "version": "4.7", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-opus-4-8", "name": "Opus 4.8", "family": "opus", "version": "4.8", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-opus-5", "name": "Opus 5", "family": "opus", "version": "5", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-sonnet-4-5", "name": "Sonnet 4.5", "family": "sonnet", "version": "4.5", "efforts": ()},
+    {"id": "claude-sonnet-4-6", "name": "Sonnet 4.6", "family": "sonnet", "version": "4.6", "efforts": ("low", "medium", "high", "max")},
+    {"id": "claude-sonnet-5", "name": "Sonnet 5", "family": "sonnet", "version": "5", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-haiku-4-5", "name": "Haiku 4.5", "family": "haiku", "version": "4.5", "efforts": ()},
+]
+MODEL_ALIASES = tuple(dict.fromkeys(model["family"] for model in MODEL_CATALOG))
+ALL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+MODEL_PICKER_FAMILIES = ("opus", "sonnet", "fable", "haiku")
 
 PERMISSION_MODES = ("bypass", "default", "acceptEdits", "plan")
 
 pending_batch_output_chats = {}
 
 
-def resolve_model_spec(spec):
-    parts = str(spec or "").lower().split()
-    if not parts or parts[0] == "default":
+def _model_for_id(model_id):
+    return next((model for model in MODEL_CATALOG if model["id"] == model_id), None)
+
+
+def _model_from_spec(spec):
+    wanted = " ".join(str(spec or "").strip().lower().split())
+    if not wanted or wanted == "default":
         return None
+    compact = wanted.replace(" ", "-").replace(".", "-")
+    if compact.startswith("claude-"):
+        compact = compact[7:]
+    parts = compact.split("-")
+    family = parts[0]
+    if family not in MODEL_ALIASES:
+        raise ValueError(f"Неизвестное семейство «{family}». Доступно: {', '.join(MODEL_ALIASES)}, default")
+    version = ".".join(parts[1:]) if len(parts) > 1 else None
+    candidates = [model for model in MODEL_CATALOG if model["family"] == family]
+    if version:
+        model = next((model for model in candidates if model["version"] == version), None)
+        if model is None:
+            raise ValueError(f"У {family} нет версии {version}.")
+        return model
+    return candidates[-1]
 
-    choice = parts[0]
-    if choice not in MODEL_VERSIONS:
-        raise ValueError(
-            f"Неизвестное семейство. Доступно: {', '.join(MODEL_ALIASES)}, default"
-        )
 
-    versions = MODEL_VERSIONS[choice]
-    version = versions[-1] if len(parts) == 1 else parts[1]
-    if version not in versions:
-        raise ValueError(
-            f"У {choice} нет версии {version}. Доступно: {', '.join(versions)}"
-        )
-    return f"claude-{choice}-{version.replace('.', '-')}"
+def resolve_model_spec(spec):
+    """Resolve a user-facing model choice to a CLI id, or None for default."""
+    model = _model_from_spec(spec)
+    return model["id"] if model else None
+
+
+def supported_efforts(model_id):
+    """Return effort choices for a model; the unpinned CLI default accepts all."""
+    if model_id is None:
+        return ALL_EFFORTS
+    model = _model_for_id(model_id)
+    return model["efforts"] if model else ()
+
+
+def resolve_effort_spec(model_id, spec):
+    """Validate an effort for a resolved model, returning None for default."""
+    wanted = str(spec or "").strip().lower()
+    if not wanted or wanted == "default":
+        return None
+    if wanted in supported_efforts(model_id):
+        return wanted
+    model = _model_for_id(model_id)
+    name = model["name"] if model else "модели по умолчанию CLI"
+    raise ValueError(f"Мощность «{spec}» недоступна для {name}.")
+
+
+def _effort_label(model_id, effort):
+    if not supported_efforts(model_id):
+        return "не поддерживается"
+    if effort is None:
+        return "по умолчанию"
+    return effort
+
+
+def render_model_picker(current_model, current_effort):
+    lines = ["🧠 Модели Claude:"]
+    models = sorted(
+        MODEL_CATALOG,
+        key=lambda model: tuple(int(part) for part in model["version"].split(".")),
+        reverse=True,
+    )
+    models.sort(key=lambda model: MODEL_PICKER_FAMILIES.index(model["family"]))
+    for model in models:
+        marker = "●" if model["id"] == current_model else "○"
+        lines.append(f"{marker} {model['name']} — `/model {model['id']}`")
+    marker = "●" if current_model is None else "○"
+    lines.append(f"{marker} По умолчанию CLI — `/model default`")
+    lines.append(f"⚡ Мощность: {_effort_label(current_model, current_effort)}. Выбрать: /effort")
+    return "\n".join(lines)
+
+
+def render_effort_picker(model_id, current_effort):
+    model = _model_for_id(model_id)
+    if model and not model["efforts"]:
+        return f"⚡ {model['name']} не поддерживает настройку мощности."
+    name = model["name"] if model else "по умолчанию CLI"
+    lines = [f"⚡ Мощность модели {name}:"]
+    for effort in supported_efforts(model_id):
+        marker = "●" if effort == current_effort else "○"
+        lines.append(f"{marker} {effort} — `/effort {effort}`")
+    marker = "●" if current_effort is None else "○"
+    lines.append(f"{marker} По умолчанию CLI — `/effort default`")
+    return "\n".join(lines)
 
 
 def process_key_for_incoming(chat_id):
@@ -82,7 +161,8 @@ COMMANDS = [
     ("stop", "Прервать текущий запрос"),
     ("compact", "Сжать контекст текущей сессии (экономит токены/деньги)"),
     ("usage", "Токены, стоимость и лимиты аккаунта"),
-    ("model", "Модель: /model opus 4.7, /model sonnet, /model default"),
+    ("model", "Модель: /model opus, /model claude-sonnet-5, /model default"),
+    ("effort", "Мощность модели: /effort high, /effort default"),
     ("mode", "Режим подтверждений: bypass/default/acceptEdits/plan"),
     ("workspace", "Рабочая директория для этой сессии"),
     ("approve", "Разрешить заблокированное действие (once/session)"),
@@ -173,13 +253,14 @@ def handle_command(chat_id, text, state, offset=None):
         msg_count = session_message_count(session_id, pdir)
         context_tokens = u.get("last_context_tokens")
         model = get_model(state, chat_id) or "default"
+        effort = get_effort(state, chat_id)
 
         def fmt(n):
             return f"{n:,}".replace(",", " ")
 
         lines = [
             "📊 **Session**",
-            f"`{session_id[:8] if session_id else 'нет активной'}`  •  Model: {model}",
+            f"`{session_id[:8] if session_id else 'нет активной'}`  •  Model: {model}  •  Мощность: {_effort_label(get_model(state, chat_id), effort)}",
             f"Messages: {msg_count if msg_count is not None else '—'}",
             (
                 f"Context: ~{fmt(context_tokens)} tokens"
@@ -215,31 +296,55 @@ def handle_command(chat_id, text, state, offset=None):
 
     if cmd == "model":
         if not arg:
-            current = get_model(state, chat_id) or "default"
-            lines = [f"Текущая модель: `{current}`", "", "Доступно:"]
-            for fam, versions in MODEL_VERSIONS.items():
-                lines.append(f"  {fam}: {', '.join(versions)} (последняя: {versions[-1]})")
-            lines.append("")
-            lines.append("Использование: /model <семейство> [версия], /model default")
-            send_message(chat_id, "\n".join(lines))
+            send_message(chat_id, render_model_picker(get_model(state, chat_id), get_effort(state, chat_id)))
             return True
 
         try:
             model_id = resolve_model_spec(arg)
-        except ValueError as exc:
-            send_message(chat_id, str(exc))
+        except ValueError:
+            send_message(
+                chat_id,
+                f"Модель «{arg}» недоступна.\n\n"
+                f"{render_model_picker(get_model(state, chat_id), get_effort(state, chat_id))}",
+            )
             return True
 
-        if model_id is None:
-            set_model(state, chat_id, None)
-            send_message(chat_id, "Модель сброшена на дефолтную.")
-            return True
-
-        parts = arg.lower().split()
-        choice = parts[0]
-        version = MODEL_VERSIONS[choice][-1] if len(parts) == 1 else parts[1]
+        previous_effort = get_effort(state, chat_id)
         set_model(state, chat_id, model_id)
-        send_message(chat_id, f"Модель переключена на {choice} {version} (`{model_id}`).")
+        effort_reset = previous_effort is not None and previous_effort not in supported_efforts(model_id)
+        if effort_reset:
+            set_effort(state, chat_id, None)
+        model = _model_for_id(model_id)
+        name = model["name"] if model else "По умолчанию CLI"
+        lines = [
+            f"🧠 Модель: {name}" + (f" (`{model_id}`)" if model_id else ""),
+            f"Мощность: {_effort_label(model_id, None if effort_reset else previous_effort)}",
+        ]
+        if effort_reset:
+            lines.append("Выбранная мощность не поддерживается новой моделью и сброшена.")
+        send_message(chat_id, "\n".join(lines))
+        return True
+
+    if cmd == "effort":
+        model_id = get_model(state, chat_id)
+        current_effort = get_effort(state, chat_id)
+        model = _model_for_id(model_id)
+        if not arg:
+            send_message(chat_id, render_effort_picker(model_id, current_effort))
+            return True
+        try:
+            effort = resolve_effort_spec(model_id, arg)
+        except ValueError:
+            name = model["name"] if model else "модели по умолчанию CLI"
+            send_message(
+                chat_id,
+                f"Мощность «{arg}» недоступна для {name}.\n\n"
+                f"{render_effort_picker(model_id, current_effort)}",
+            )
+            return True
+        set_effort(state, chat_id, effort)
+        name = model["name"] if model else "по умолчанию CLI"
+        send_message(chat_id, f"⚡ Мощность {name}: {_effort_label(model_id, effort)}")
         return True
 
     if cmd == "mode":
@@ -282,6 +387,7 @@ def handle_command(chat_id, text, state, offset=None):
     if cmd == "status":
         session_id = get_session(state, chat_id)
         model = get_model(state, chat_id) or "default"
+        effort = _effort_label(get_model(state, chat_id), get_effort(state, chat_id))
         mode = get_permission_mode(state, chat_id) or "bypass"
         workspace = get_workspace(state, chat_id)
         busy = "да, выполняется запрос (можно /stop)" if chat_id in busy_chats else "нет"
@@ -289,7 +395,7 @@ def handle_command(chat_id, text, state, offset=None):
         lines = [
             "ℹ️ **Статус**",
             f"Сессия: `{session_id[:8] if session_id else 'нет активной'}`",
-            f"Модель: `{model}`",
+            f"Модель: `{model}` · Мощность: `{effort}`",
             f"Режим: `{mode}`",
             f"Workspace: `{workspace}`",
             f"Занят: {busy}",
@@ -430,7 +536,7 @@ def spawn_turn(
 
 def start_delegate_turn(
     chat_id, prompt, state, resume_session_id=None, workspace=None,
-    model_spec=None, env=None,
+    model_spec=None, effort_spec=None, env=None,
 ):
     """Start one isolated, persistent turn for bridge_exec.py.
 
@@ -443,6 +549,7 @@ def start_delegate_turn(
     requested_session_id = str(resume_session_id or "").strip() or None
     requested_env = dict(env or {})
     model_requested = model_spec is not None
+    effort_requested = effort_spec is not None
     try:
         requested_model = resolve_model_spec(model_spec) if model_requested else None
     except ValueError as exc:
@@ -460,6 +567,19 @@ def start_delegate_turn(
     cancel_pending_batch(delegate_process)
     owner_session_id = get_session(state, chat_id)
     delegate_session_id = get_session(state, delegate_process)
+    inherited_model = get_model(state, chat_id)
+    current_delegate_model = get_model(state, delegate_process)
+    final_model = (
+        requested_model if model_requested else
+        (current_delegate_model if requested_session_id else inherited_model)
+    )
+    try:
+        requested_effort = (
+            resolve_effort_spec(final_model, effort_spec) if effort_requested else None
+        )
+    except ValueError as exc:
+        _delegate_error(chat_id, str(exc))
+        return False
 
     if requested_session_id:
         is_matching_delegate = bool(
@@ -482,17 +602,25 @@ def start_delegate_turn(
             set_workspace(state, delegate_process, workspace)
         if model_requested:
             set_model(state, delegate_process, requested_model)
+        stored_effort = get_effort(state, delegate_process)
+        if effort_requested:
+            set_effort(state, delegate_process, requested_effort)
+        elif stored_effort not in supported_efforts(final_model):
+            set_effort(state, delegate_process, None)
     else:
         # A default delegation is always fresh. Stop only the idle delegate
         # slot; the owner's independent process is never touched here.
         _stop_chat_process(delegate_process)
         clear_session(state, delegate_process)
         clear_pending_prompt(state, delegate_process)
-        set_model(
-            state,
-            delegate_process,
-            requested_model if model_requested else get_model(state, chat_id),
-        )
+        set_model(state, delegate_process, final_model)
+        inherited_effort = get_effort(state, chat_id)
+        if effort_requested:
+            set_effort(state, delegate_process, requested_effort)
+        elif inherited_effort in supported_efforts(final_model):
+            set_effort(state, delegate_process, inherited_effort)
+        else:
+            set_effort(state, delegate_process, None)
         set_permission_mode(state, delegate_process, get_permission_mode(state, chat_id))
         set_workspace(state, delegate_process, workspace or get_workspace(state, chat_id))
 
@@ -607,6 +735,7 @@ def dispatch_turn(
     send_typing(telegram_chat_id)
 
     model = get_model(state, settings_chat_id)
+    effort = get_effort(state, settings_chat_id)
     permission_mode = force_permission_mode or get_permission_mode(state, settings_chat_id)
     workspace = get_workspace(state, settings_chat_id)
     config_dir = account_dir(
@@ -618,10 +747,11 @@ def dispatch_turn(
         chat_id,
         prompt,
         state,
-        model,
-        permission_mode,
-        workspace,
-        config_dir,
+        model=model,
+        effort=effort,
+        permission_mode=permission_mode,
+        workspace=workspace,
+        config_dir=config_dir,
         output_chat_id=telegram_chat_id,
         delegated=delegated,
         extra_env=extra_env,
