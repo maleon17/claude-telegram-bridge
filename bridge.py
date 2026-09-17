@@ -614,7 +614,7 @@ def _process_message(msg, state):
             # the "⏹ Остановлено" message itself; this is just the
             # immediate ack. Next message respawns fresh via
             # --resume onto the same session, so nothing is lost.
-            target_key = process_key_for_incoming(chat_id)
+            target_key = process_key_for_incoming(chat_id, state)
             cancel_pending_batch(target_key)
             if target_key in busy_chats:
                 _stop_chat_process(target_key)
@@ -752,7 +752,7 @@ def _handle_urgent_stop(chat_id):
     # finally-block delivers the "⏹ Остановлено" message itself; this is just
     # the immediate ack. Next message respawns fresh via --resume onto the
     # same session, so nothing is lost.
-    target_key = process_key_for_incoming(chat_id)
+    target_key = process_key_for_incoming(chat_id, state)
     cancel_pending_batch(target_key)
     if target_key in busy_chats:
         _stop_chat_process(target_key)

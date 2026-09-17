@@ -59,6 +59,17 @@ def set_pending_delegator(state, chat_id, session_id):
         save_state(state)
 
 
+def get_delegate_resume_selected(state, chat_id):
+    return bool(state.get(str(delegate_key(chat_id)), {}).get("resume_selected"))
+
+
+def set_delegate_resume_selected(state, chat_id, selected):
+    with state_lock:
+        entry = state.setdefault(str(delegate_key(chat_id)), {})
+        entry["resume_selected"] = bool(selected)
+        save_state(state)
+
+
 def clear_session(state, chat_id):
     with state_lock:
         entry = state.get(str(chat_id))

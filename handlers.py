@@ -13,11 +13,11 @@ from runtime import (
 )
 from state_store import (
     clear_pending_prompt, clear_session, delegate_key, fetch_account_limits,
-    get_account_status, get_effort, get_model, get_pending_prompt, get_permission_mode,
+    get_account_status, get_delegate_resume_selected, get_effort, get_model, get_pending_prompt, get_permission_mode,
     get_session, get_usage, get_workspace, list_sessions, pop_delegate_request_id,
     projects_dir_for,
     request_restart, session_message_count, set_account_status, set_effort, set_model,
-    set_delegate_request_id, set_pending_delegator, set_permission_mode, set_session,
+    set_delegate_request_id, set_delegate_resume_selected, set_pending_delegator, set_permission_mode, set_session,
     set_workspace,
 )
 from chat_process import (
@@ -139,16 +139,22 @@ def render_effort_picker(model_id, current_effort):
     return "\n".join(lines)
 
 
-def process_key_for_incoming(chat_id):
-    """Route a real Telegram message to a busy delegated process, if any."""
+def process_key_for_incoming(chat_id, state):
+    """Route a real Telegram message to the active delegated process."""
     delegate_process = delegate_key(chat_id)
-    return delegate_process if delegate_process in busy_chats else chat_id
+    return delegate_process if (
+        delegate_process in busy_chats or get_delegate_resume_selected(state, chat_id)
+    ) else chat_id
 
 
 def process_key_for_command(chat_id, state):
     """Like process_key_for_incoming, also preserve delegated denial state."""
     delegate_process = delegate_key(chat_id)
-    if delegate_process in busy_chats or get_pending_prompt(state, delegate_process):
+    if (
+        delegate_process in busy_chats
+        or get_pending_prompt(state, delegate_process)
+        or get_delegate_resume_selected(state, chat_id)
+    ):
         return delegate_process
     return chat_id
 
@@ -239,33 +245,44 @@ def handle_command(chat_id, text, state, offset=None):
         if not SESSION_PREFIX_RE.fullmatch(wanted):
             send_message(chat_id, f"Сессия {arg} не найдена.")
             return True
-        try:
-            names = os.listdir(pdir)
-        except OSError:
-            names = []
-        session_ids = sorted(
-            name[:-6] for name in names
-            if name.endswith(".jsonl") and os.path.isfile(os.path.join(pdir, name))
+        delegate_process = delegate_key(chat_id)
+        delegate_pdir = projects_dir_for(
+            account_dir(chat_id, state_key=delegate_process),
+            get_workspace(state, delegate_process),
         )
-        matches = [sid for sid in session_ids if sid.lower() == wanted]
-        if not matches:
-            matches = [sid for sid in session_ids if sid.lower().startswith(wanted)]
+
+        def matching_sessions(directory):
+            try:
+                names = os.listdir(directory)
+            except OSError:
+                names = []
+            session_ids = sorted(
+                name[:-6] for name in names
+                if name.endswith(".jsonl") and os.path.isfile(os.path.join(directory, name))
+            )
+            exact = [sid for sid in session_ids if sid.lower() == wanted]
+            return exact or [sid for sid in session_ids if sid.lower().startswith(wanted)]
+
+        matches = [(chat_id, sid) for sid in matching_sessions(pdir)]
+        matches += [(delegate_process, sid) for sid in matching_sessions(delegate_pdir)]
         if not matches:
             send_message(chat_id, f"Сессия {arg} не найдена.")
             return True
         if len(matches) > 1:
             lines = [f"Префикс {arg} подходит к нескольким сессиям, уточни id:"]
-            lines.extend(f"`{sid}`" for sid in matches[:10])
+            lines.extend(f"`{sid}`" for _, sid in matches[:10])
             if len(matches) > 10:
                 lines.append(f"…и ещё {len(matches) - 10}")
             send_message(chat_id, "\n".join(lines))
             return True
-        sid = matches[0]
-        cancel_pending_batch(chat_id)
-        _stop_chat_process(chat_id)  # see /new -- same reason
-        clear_pending_prompt(state, chat_id)
-        set_session(state, chat_id, sid)
-        send_message(chat_id, f"Продолжаю сессию {sid[:8]}.")
+        process_key, sid = matches[0]
+        cancel_pending_batch(process_key)
+        _stop_chat_process(process_key)  # see /new -- same reason
+        clear_pending_prompt(state, process_key)
+        set_session(state, process_key, sid)
+        delegated = process_key == delegate_process
+        set_delegate_resume_selected(state, chat_id, delegated)
+        send_message(chat_id, f"Продолжаю {'делегированную ' if delegated else ''}сессию {sid[:8]}.")
         return True
 
     if cmd == "usage":
@@ -662,6 +679,7 @@ def start_delegate_turn(
         # slot; the owner's independent process is never touched here.
         _stop_chat_process(delegate_process)
         clear_session(state, delegate_process)
+        set_delegate_resume_selected(state, chat_id, False)
         clear_pending_prompt(state, delegate_process)
         set_model(state, delegate_process, final_model)
         inherited_effort = get_effort(state, chat_id)
@@ -773,7 +791,7 @@ def queue_prompt(chat_id, prompt, state, output_chat_id=None):
 
 
 def route_prompt(chat_id, prompt, state):
-    process_key = process_key_for_incoming(chat_id)
+    process_key = process_key_for_incoming(chat_id, state)
     if process_key == chat_id:
         queue_prompt(process_key, prompt, state)
     else:

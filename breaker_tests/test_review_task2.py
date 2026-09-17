@@ -89,6 +89,27 @@ def test_c02_resume_requires_unambiguous_prefix():
     print("[C02] ambiguous or glob /resume never picks a session silently")
 
 
+def test_c02_delegate_resume_uses_the_delegate_store_and_route():
+    state = {}
+    chat_id = "delegate-resume"
+    delegate_process = handlers.delegate_key(chat_id)
+    pdir = projects_dir_for(
+        runtime.account_dir(chat_id, state_key=delegate_process),
+        None,
+    )
+    os.makedirs(pdir, exist_ok=True)
+    sid = "de1e6a7e-1111-4222-8333-444444444444"
+    open(os.path.join(pdir, sid + ".jsonl"), "w").close()
+    sent, fake = _messages()
+    with Capture(handlers__send_message=fake, handlers___stop_chat_process=lambda key: None):
+        handlers.handle_command(chat_id, "/resume de1e6a7e", state)
+    assert get_session(state, chat_id) is None
+    assert get_session(state, delegate_process) == sid
+    assert handlers.process_key_for_incoming(chat_id, state) == delegate_process
+    assert "делегированную" in sent[-1][1]
+    print("[C02] footer /resume finds and selects a delegated session")
+
+
 def test_c03_pending_approval_bound_to_session():
     state = {}
     set_session(state, "7", "old-session")
@@ -412,6 +433,7 @@ def test_c09_voice_without_whisper_gets_explicit_reply():
 if __name__ == "__main__":
     test_c01_mode_is_case_insensitive_and_canonical()
     test_c02_resume_requires_unambiguous_prefix()
+    test_c02_delegate_resume_uses_the_delegate_store_and_route()
     test_c03_pending_approval_bound_to_session()
     test_c03_replaced_process_cannot_leave_pending_approval()
     test_c04_draining_refuses_new_work_and_idle_is_atomic()
