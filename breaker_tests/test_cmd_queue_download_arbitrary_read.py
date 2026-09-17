@@ -45,6 +45,7 @@ is also /tmp). This test now verifies the fix directly: files outside /tmp
 rejected, while a legitimate file the app itself would plausibly write
 under /tmp is still servable.
 """
+import hashlib
 import http.client
 import os
 import threading
@@ -52,6 +53,8 @@ import time
 import uuid
 
 from _checkouts import CLAUDE_JARVIS_DIR, require
+
+TOKEN = "breaker-test-token"
 
 # The live jarvis-ask-cmd-queue.service runs this canonical file; the old
 # ~/.hermes/scripts copy is a dead leftover and must not be tested instead.
@@ -69,24 +72,33 @@ def _load_real_queue_handler():
     # port. Every line of handler logic remains the real shipped code.
     ns = {"__name__": "cmd_queue_under_test", "__file__": REAL_CMD_QUEUE_PATH}
     exec(compile(source, REAL_CMD_QUEUE_PATH, "exec"), ns)
-    return ns["Queue"], ns["ThreadingHTTPServer"]
+    return ns
 
 
 def main():
-    Queue, ThreadingHTTPServer = _load_real_queue_handler()
+    module = _load_real_queue_handler()
+    Queue, ThreadingHTTPServer = module["Queue"], module["ThreadingHTTPServer"]
+
+    # /download now also requires an authenticated instance token and a
+    # registered artifact (S01/S02) -- exercise the real auth/scoping path,
+    # not a bypass, since a wrong path here would silently "pass" for the
+    # wrong reason (401, not the intended /tmp-scoping rejection).
+    module["RELAY_TOKENS"] = {hashlib.sha256(TOKEN.encode()).hexdigest(): "breaker"}
+    module["RELAY_OWNER_IDS"] = {"breaker": "1"}
+
+    def download(path):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", f"/download?path={path}", headers={"Authorization": f"Bearer {TOKEN}"})
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return body
 
     # Ephemeral loopback port -- NOT the live service's 9092.
     server = ThreadingHTTPServer(("127.0.0.1", 0), Queue)
     port = server.server_address[1]
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    def download(path):
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        conn.request("GET", f"/download?path={path}")
-        resp = conn.getresponse()
-        body = resp.read()
-        conn.close()
-        return body
 
     try:
         n = 0
@@ -126,14 +138,15 @@ def main():
         assert b"root:" not in body, f"traversal escaped /tmp scoping: {body!r}"
         print(f"[{n}/{checks}] /tmp/../etc/passwd (traversal) -> blocked ({body!r})")
 
-        # Functionality check: a legitimate file under /tmp -- the one
-        # directory /upload's save_path and SEND_FILE's WORKDIR actually use
-        # -- must still be servable, or the fix broke real functionality.
+        # Functionality check: a legitimate file under /tmp, registered as
+        # this instance's own artifact the way /upload and SEND_FILE do --
+        # must still be servable, or the fix broke real functionality.
         n += 1
         marker = f"LEGIT-{uuid.uuid4().hex}"
         legit_path = "/tmp/breaker_cmdq_legit_check.txt"
         with open(legit_path, "w") as f:
             f.write(marker)
+        module["_register_artifact"]("breaker", legit_path)
         try:
             body = download(legit_path)
             assert body.decode() == marker, f"legit /tmp download broke: {body!r}"
