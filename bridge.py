@@ -27,10 +27,10 @@ from collections import deque
 from runtime import (
     DRAINING_TEXT, EXTERNAL_REQUEST_DIR, EXTERNAL_REQUEST_FILE, FILE_SEND_MAX_CAPTION_CHARS,
     FILE_SEND_QUEUE_DIR,
-    FILE_SEND_RESULT_DIR, MAX_DOCUMENT_BYTES, OWNER_ID, RESTART_SIGNAL_FILE, SERVICE_NAME,
-    WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset, draining,
+    FILE_SEND_RESULT_DIR, LOCAL_BOT_API, MAX_DOCUMENT_BYTES, OWNER_ID, RESTART_SIGNAL_FILE,
+    SERVICE_NAME, WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset, draining,
     ensure_owner_mcp_config, intake_active, intake_lock, intake_queues, load_whitelist,
-    pending_batches, tenant_file_outbox,
+    pending_batches, pending_progress_lock, pending_progress_msg_ids, tenant_file_outbox,
 )
 from state_store import (
     clear_pending_prompt, get_account_status, get_pending_prompt, load_state,
@@ -48,7 +48,7 @@ from handlers import (
     spawn_turn, start_delegate_turn,
 )
 from telegram_api import (
-    download_telegram_file, edit_message, rich_message_to_markdown, send_message,
+    AttachmentDownloadError, download_telegram_file, edit_message, rich_message_to_markdown, send_message,
     send_document, tg_call, transcribe_voice, voice_transcription_available,
 )
 
@@ -679,21 +679,6 @@ def _process_message(msg, state):
                 return
 
         attachment_note = ""
-        if photo:
-            largest = photo[-1]
-            local_path = download_telegram_file(chat_id, largest["file_id"])
-            if local_path:
-                attachment_note += f"\n\n[Прикреплено изображение: {local_path}]"
-            else:
-                send_message(chat_id, "Не удалось скачать изображение.")
-        if document:
-            local_path = download_telegram_file(
-                chat_id, document["file_id"], filename_hint=document.get("file_name")
-            )
-            if local_path:
-                attachment_note += f"\n\n[Прикреплён файл: {local_path}]"
-            else:
-                send_message(chat_id, "Не удалось скачать файл.")
         voice_text = ""
         if voice and not voice_transcription_available():
             send_message(
@@ -704,17 +689,48 @@ def _process_message(msg, state):
             voice = None
             if not (text.strip() or caption.strip() or photo or document):
                 return
+        download_progress_msg_id = None
+        if LOCAL_BOT_API and (photo or document or voice):
+            status = send_message(chat_id, "📥 Загружаю вложение…")
+            if status.get("ok"):
+                download_progress_msg_id = (status.get("result") or {}).get("message_id")
+        if photo:
+            largest = photo[-1]
+            try:
+                local_path = download_telegram_file(
+                    chat_id, largest["file_id"], file_size=largest.get("file_size"),
+                )
+                attachment_note += f"\n\n[Прикреплено изображение: {local_path}]"
+            except AttachmentDownloadError as exc:
+                send_message(chat_id, str(exc))
+                detail = str(exc).removeprefix("Файл не скачан: ")
+                attachment_note += f"\n\n[Файл не скачан: {detail}. Не ищи его на диске.]"
+        if document:
+            try:
+                local_path = download_telegram_file(
+                    chat_id, document["file_id"], filename_hint=document.get("file_name"),
+                    file_size=document.get("file_size"),
+                )
+                attachment_note += f"\n\n[Прикреплён файл: {local_path}]"
+            except AttachmentDownloadError as exc:
+                send_message(chat_id, str(exc))
+                detail = str(exc).removeprefix("Файл не скачан: ")
+                attachment_note += f"\n\n[Файл не скачан: {detail}. Не ищи его на диске.]"
         if voice:
-            local_path = download_telegram_file(chat_id, voice["file_id"])
-            if local_path:
+            try:
+                local_path = download_telegram_file(
+                    chat_id, voice["file_id"], file_size=voice.get("file_size"),
+                )
                 try:
                     voice_text = transcribe_voice(local_path)
                 except Exception:
                     print(traceback.format_exc()[-1500:], flush=True)
                 if not voice_text:
                     send_message(chat_id, "Не удалось распознать голосовое сообщение.")
-            else:
-                send_message(chat_id, "Не удалось скачать голосовое сообщение.")
+            except AttachmentDownloadError as exc:
+                send_message(chat_id, str(exc))
+                detail = str(exc).removeprefix("Файл не скачан: ")
+                attachment_note += f"\n\n[Файл не скачан: {detail}. Не ищи его на диске.]"
 
         prompt = _build_message_prompt(
             msg, text, caption, voice_text, attachment_note,
@@ -722,6 +738,10 @@ def _process_message(msg, state):
         if not prompt:
             return
 
+        if download_progress_msg_id is not None:
+            target_key = process_key_for_incoming(chat_id, state)
+            with pending_progress_lock:
+                pending_progress_msg_ids[target_key] = download_progress_msg_id
         route_prompt(chat_id, prompt, state)
     except Exception:
         err = traceback.format_exc()[-1500:]

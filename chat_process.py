@@ -10,7 +10,7 @@ import traceback
 from runtime import (
     CHAT_PROC_IDLE_TIMEOUT_S, CLAUDE_BIN, EDIT_THROTTLE_S, EXTERNAL_RESULT_DIR, STATE_FILE,
     STATE_INSTANCE_NAME, THINKING_SPINNER_FRAMES, WORKDIR, busy_chats, chat_procs,
-    chat_procs_lock, claude_env,
+    chat_procs_lock, claude_env, pending_progress_lock, pending_progress_msg_ids,
 )
 from state_store import (
     add_usage, clear_pending_prompt, get_pending_delegator, get_session,
@@ -247,6 +247,8 @@ def _new_turn_accumulator(state, chat_id):
     """Fresh per-turn accumulator for _chat_reader_loop. One of these is
     live at a time per chat process; reset right after each delivered
     "result" event so state from one turn never bleeds into the next."""
+    with pending_progress_lock:
+        pending_progress_msg_id = pending_progress_msg_ids.pop(chat_id, None)
     return {
         "log_lines": [],
         "current_session_id": get_session(state, chat_id),
@@ -272,8 +274,8 @@ def _new_turn_accumulator(state, chat_id):
         "draft_res_blocks": [],  # list of (label, content)
         # message_id of the live progress message this turn (see
         # _flush_draft) -- None until the first flush sends it.
-        "progress_msg_id": None,
-        "progress_attempted": False,
+        "progress_msg_id": pending_progress_msg_id,
+        "progress_attempted": pending_progress_msg_id is not None,
         # Braille-spinner frame index (see THINKING_SPINNER_FRAMES) --
         # advances on every actual send/edit, purely cosmetic "still alive"
         # signal now that we no longer get Telegram's own native draft

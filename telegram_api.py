@@ -2,6 +2,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import threading
 import time
 import urllib.error
@@ -10,8 +11,9 @@ import urllib.request
 import uuid
 
 from runtime import (
-    API_BASE, FILE_API_BASE, FILE_PATH_RE, IMAGE_EXTS, MAX_DOCUMENT_BYTES,
-    MAX_MSG_LEN, MAX_PHOTO_BYTES, RICH_MAX_CHARS, UPLOADS_DIR,
+    API_BASE, FILE_API_BASE, FILE_PATH_RE, GET_FILE_TIMEOUT_S, IMAGE_EXTS,
+    LOCAL_BOT_API, MAX_DOCUMENT_BYTES, MAX_MSG_LEN, MAX_PHOTO_BYTES,
+    RICH_MAX_CHARS, SEND_TIMEOUT_S, TELEGRAM_CLOUD_FILE_MAX_BYTES, UPLOADS_DIR,
 )
 from telegram_format import format_message, strip_mdv2
 
@@ -164,14 +166,30 @@ def send_photo(chat_id, path, caption=None):
     fields = {"chat_id": str(chat_id)}
     if caption:
         fields["caption"] = caption[:1024]
-    return _multipart_request("sendPhoto", fields, "photo", path)
+    return _send_file("sendPhoto", fields, "photo", path)
 
 
 def send_document(chat_id, path, caption=None):
     fields = {"chat_id": str(chat_id)}
     if caption:
         fields["caption"] = caption[:1024]
-    return _multipart_request("sendDocument", fields, "document", path)
+    return _send_file("sendDocument", fields, "document", path)
+
+
+def _send_file(method, fields, file_field, path):
+    """Use the local server's file:// fast path, safely falling back once."""
+    if LOCAL_BOT_API:
+        local_fields = dict(fields)
+        local_fields[file_field] = "file://" + os.path.abspath(path)
+        result = tg_call(method, local_fields, timeout=SEND_TIMEOUT_S)
+        if result.get("ok"):
+            return result
+        # An absent description/error code means the request's outcome is
+        # unknown (timeout/network failure).  Retrying could send duplicates.
+        if "description" not in result and "error_code" not in result:
+            return result
+        print(f"Telegram local {method} rejected file://; retrying multipart: {result}", flush=True)
+    return _multipart_request(method, fields, file_field, path, timeout=SEND_TIMEOUT_S)
 
 
 def send_attachment(chat_id, path, caption=None):
@@ -188,23 +206,115 @@ def send_attachment(chat_id, path, caption=None):
         send_message(chat_id, f"Не удалось отправить `{path}`: {r.get('description', r)}")
 
 
-def download_telegram_file(chat_id, file_id, filename_hint=None):
-    r = tg_call("getFile", {"file_id": file_id})
-    if not r.get("ok"):
-        return None
-    file_path = r["result"]["file_path"]
-    url = f"{FILE_API_BASE}/{file_path}"
-    name = filename_hint or os.path.basename(file_path) or f"{file_id}.bin"
-    name = re.sub(r"[^\w.\-]", "_", name)
+class AttachmentDownloadError(RuntimeError):
+    """A download failure with a stable machine-readable reason."""
+
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
+
+
+def _download_error_from_exception(exc):
+    if isinstance(exc, TimeoutError):
+        return AttachmentDownloadError(
+            "timeout", "Файл не скачан: Telegram слишком долго готовил файл. Попробуй ещё раз или дай ссылку."
+        )
+    if isinstance(exc, PermissionError):
+        return AttachmentDownloadError(
+            "local_file_access", "Файл не скачан: нет доступа к файлу локального Bot API."
+        )
+    if isinstance(exc, (urllib.error.URLError, ConnectionError, OSError)):
+        return AttachmentDownloadError(
+            "network", "Файл не скачан: ошибка связи с Telegram. Попробуй ещё раз или дай ссылку."
+        )
+    return AttachmentDownloadError(
+        "download_failed", "Файл не скачан: Telegram не дал получить файл. Попробуй ещё раз или дай ссылку."
+    )
+
+
+def _get_file_error(result):
+    detail = str(result.get("error") or result.get("description") or "").lower()
+    if not LOCAL_BOT_API and "file is too big" in detail:
+        return AttachmentDownloadError(
+            "too_big_for_cloud",
+            "Файл не скачан: размер превышает облачный лимит Telegram 20 МБ. Включи локальный Bot API или дай ссылку.",
+        )
+    if "timeout" in detail or "timed out" in detail:
+        return AttachmentDownloadError(
+            "timeout", "Файл не скачан: Telegram слишком долго готовил файл. Попробуй ещё раз или дай ссылку."
+        )
+    if result.get("error"):
+        return AttachmentDownloadError(
+            "network", "Файл не скачан: ошибка связи с Telegram. Попробуй ещё раз или дай ссылку."
+        )
+    return AttachmentDownloadError(
+        "get_file_failed", "Файл не скачан: Telegram отказал в выдаче файла. Отправь его снова или дай ссылку."
+    )
+
+
+def download_telegram_file(chat_id, file_id, filename_hint=None, file_size=None):
+    """Store a Telegram file in this chat's upload directory or raise a reasoned error."""
+    if not LOCAL_BOT_API and isinstance(file_size, int) and file_size > TELEGRAM_CLOUD_FILE_MAX_BYTES:
+        raise AttachmentDownloadError(
+            "too_big_for_cloud",
+            "Файл не скачан: размер превышает облачный лимит Telegram 20 МБ. Включи локальный Bot API или дай ссылку.",
+        )
+    result = tg_call("getFile", {"file_id": file_id}, timeout=GET_FILE_TIMEOUT_S)
+    if not result.get("ok"):
+        raise _get_file_error(result)
+    file_path = (result.get("result") or {}).get("file_path")
+    if not file_path:
+        raise AttachmentDownloadError(
+            "get_file_failed", "Файл не скачан: Telegram не вернул путь к файлу. Попробуй ещё раз или дай ссылку."
+        )
+    name = re.sub(r"[^\w.\-]", "_", filename_hint or os.path.basename(file_path) or f"{file_id}.bin")
     chat_dir = os.path.join(UPLOADS_DIR, str(chat_id))
     local_path = os.path.join(chat_dir, f"{int(time.time() * 1000)}_{name}")
     try:
         os.makedirs(chat_dir, exist_ok=True)
-        with urllib.request.urlopen(url, timeout=60) as resp, open(local_path, "wb") as f:
-            f.write(resp.read())
+        source = os.path.abspath(file_path)
+        if LOCAL_BOT_API and os.path.isabs(file_path):
+            try:
+                source_stat = os.stat(source)
+            except FileNotFoundError as exc:
+                raise AttachmentDownloadError(
+                    "local_file_missing", "Файл не скачан: локальный Bot API больше не видит этот файл. Отправь его снова или дай ссылку."
+                ) from exc
+            except PermissionError as exc:
+                raise AttachmentDownloadError(
+                    "local_file_access", "Файл не скачан: нет доступа к файлу локального Bot API."
+                ) from exc
+            if not os.path.isfile(source):
+                raise AttachmentDownloadError(
+                    "local_file_access", "Файл не скачан: путь локального Bot API не является доступным файлом."
+                )
+            if source_stat.st_size > MAX_DOCUMENT_BYTES:
+                raise AttachmentDownloadError("too_big", "Файл не скачан: размер превышает разрешённый лимит.")
+            shutil.move(source, local_path)
+            return local_path
+        total = 0
+        with urllib.request.urlopen(f"{FILE_API_BASE}/{file_path}", timeout=GET_FILE_TIMEOUT_S) as resp, open(local_path, "wb") as handle:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_DOCUMENT_BYTES:
+                    raise AttachmentDownloadError("too_big", "Файл не скачан: размер превышает разрешённый лимит.")
+                handle.write(chunk)
         return local_path
-    except Exception:
-        return None
+    except AttachmentDownloadError:
+        try:
+            os.unlink(local_path)
+        except FileNotFoundError:
+            pass
+        raise
+    except Exception as exc:
+        try:
+            os.unlink(local_path)
+        except FileNotFoundError:
+            pass
+        raise _download_error_from_exception(exc) from exc
 
 
 _whisper_model = None

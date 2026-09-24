@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.error
 import uuid
 import glob
+from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from telegram_format import format_message, strip_mdv2, escape_mdv2
@@ -31,8 +32,34 @@ PROJECTS_DIR = os.path.join(
     os.path.expanduser("~/.claude/projects"), WORKDIR.replace("/", "-")
 )
 
-API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
-FILE_API_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
+def env_positive_int(name, default):
+    """Read a positive integer setting, retaining a safe default on errors."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"Ignoring invalid {name}; using {default}", flush=True)
+        return default
+    if value <= 0:
+        print(f"Ignoring non-positive {name}; using {default}", flush=True)
+        return default
+    return value
+
+
+def telegram_api_config(value):
+    """Return the normalized Bot API root and whether it is a local server."""
+    root = (value or "https://api.telegram.org").strip().rstrip("/")
+    parsed = urlsplit(root)
+    if not parsed.scheme or not parsed.netloc:
+        raise SystemExit("claude-telegram-bridge: TELEGRAM_API_URL must be an absolute URL")
+    return root, bool(value and (parsed.hostname or "").lower() != "api.telegram.org")
+
+
+TELEGRAM_API_URL, LOCAL_BOT_API = telegram_api_config(os.environ.get("TELEGRAM_API_URL"))
+API_BASE = f"{TELEGRAM_API_URL}/bot{BOT_TOKEN}"
+FILE_API_BASE = f"{TELEGRAM_API_URL}/file/bot{BOT_TOKEN}"
 EDIT_THROTTLE_S = 1.3
 # Same Braille frame set as jarvis-ask's THINKING_SPINNER_FRAMES (claude_ask.py)
 # -- a purely cosmetic "still alive" cue for the live-progress message (see
@@ -54,7 +81,19 @@ UPLOADS_DIR = os.path.join(
 
 IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
-MAX_DOCUMENT_BYTES = 45 * 1024 * 1024
+# This bridge has one document limit for both incoming and outgoing files, so
+# use one explicit setting instead of two potentially divergent limits.
+MAX_DOCUMENT_BYTES = env_positive_int(
+    "TELEGRAM_FILE_MAX_BYTES",
+    (2000 if LOCAL_BOT_API else 20) * 1024 * 1024,
+)
+TELEGRAM_CLOUD_FILE_MAX_BYTES = 20 * 1024 * 1024
+GET_FILE_TIMEOUT_S = env_positive_int(
+    "TELEGRAM_GET_FILE_TIMEOUT_S", 600 if LOCAL_BOT_API else 20,
+)
+SEND_TIMEOUT_S = env_positive_int(
+    "TELEGRAM_SEND_TIMEOUT_S", 600 if LOCAL_BOT_API else 60,
+)
 FILE_PATH_RE = re.compile(
     r"(/(?:[\w.\-]+/)+[\w.\-]+\.(?:"
     r"png|jpe?g|gif|webp|bmp|svg|pdf|zip|tar|gz|txt|md|csv|json"
@@ -95,6 +134,11 @@ DRAINING_TEXT = "🔄 Бот перезапускается — повтори �
 # set of chats whose intake worker is currently running.
 intake_queues = {}
 intake_active = set()
+# A local-mode download status bubble is created by bridge.py before the
+# debounced prompt reaches Claude.  The reader consumes this ID when it makes
+# the next turn accumulator, so its normal progress card edits that bubble.
+pending_progress_msg_ids = {}
+pending_progress_lock = threading.Lock()
 # Mutable box so the restart-watcher background thread (see
 # _restart_watcher_loop) can read main()'s current getUpdates offset
 # without needing it passed in explicitly.

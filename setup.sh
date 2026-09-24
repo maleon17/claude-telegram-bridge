@@ -94,6 +94,16 @@ if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
+# /update can optionally build and switch to the loopback-only Telegram Bot
+# API server.  Its service still needs a separate, narrowly scoped restart
+# grant; do not create that grant for installations that opt out here.
+TELEGRAM_BOT_API_UNIT="${TELEGRAM_BOT_API_UNIT:-telegram-bot-api}"
+if ! [[ "$TELEGRAM_BOT_API_UNIT" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+    echo "Telegram Bot API unit name may only contain letters, digits, '_', '.', '@' and '-'."
+    exit 1
+fi
+read -rp "Allow /update to configure the optional local Bot API server (files up to 2 GB)? [y/N] " LOCAL_BOT_API_SETUP
+
 # --- optional: local voice transcription ---------------------------------
 
 if python3 -c "import faster_whisper" >/dev/null 2>&1; then
@@ -119,6 +129,9 @@ umask 077
     printf 'OWNER_ID=%s\n' "$OWNER_ID"
     printf 'SERVICE_NAME=%s.service\n' "$SERVICE_NAME"
     printf 'CLAUDE_BIN=%s\n' "$CLAUDE_BIN"
+    if [[ "$LOCAL_BOT_API_SETUP" =~ ^[Yy]$ ]]; then
+        printf 'TELEGRAM_BOT_API_UNIT=%s\n' "$TELEGRAM_BOT_API_UNIT"
+    fi
 } > "$WORK_DIR/bridge.env"
 install -m 600 "$WORK_DIR/bridge.env" "$ENV_FILE"
 umask 022
@@ -130,10 +143,16 @@ sed \
     -e "s|__ENV_FILE__|${ENV_FILE}|g" \
     claude-telegram-bridge.service.example > "$WORK_DIR/unit.service"
 
-# /restart and /update restart the service through `sudo -n`; allow exactly
-# that one command, nothing else.
-printf '%s ALL=(root) NOPASSWD: %s restart %s.service\n' \
-    "$INSTALL_USER" "$SYSTEMCTL_BIN" "$SERVICE_NAME" > "$WORK_DIR/sudoers"
+# /restart and /update restart the bridge through `sudo -n`; if the owner
+# opted into the local server, grant exactly its restart too and nothing else.
+{
+    printf '%s ALL=(root) NOPASSWD: %s restart %s.service\n' \
+        "$INSTALL_USER" "$SYSTEMCTL_BIN" "$SERVICE_NAME"
+    if [[ "$LOCAL_BOT_API_SETUP" =~ ^[Yy]$ ]]; then
+        printf '%s ALL=(root) NOPASSWD: %s restart %s.service\n' \
+            "$INSTALL_USER" "$SYSTEMCTL_BIN" "$TELEGRAM_BOT_API_UNIT"
+    fi
+} > "$WORK_DIR/sudoers"
 if ! visudo -cf "$WORK_DIR/sudoers" >/dev/null 2>&1 && ! sudo visudo -cf "$WORK_DIR/sudoers" >/dev/null; then
     echo "Generated sudoers rule failed validation -- not installing it."
     exit 1
