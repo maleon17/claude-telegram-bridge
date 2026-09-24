@@ -32,6 +32,10 @@ def _prepare_owner_home():
     _write(os.path.join(TMP, ".claude", "CLAUDE.md"), "OWNER PERSONA MARKER\n")
     _write(os.path.join(TMP, ".claude", ".credentials.json"), "credentials")
     _write(
+        os.path.join(TMP, ".claude", "projects", "-tmp", "legacy-session.jsonl"),
+        "legacy conversation\n",
+    )
+    _write(
         os.path.join(TMP, ".claude.json"),
         '{"mcpServers": {"owner-marker": {"command": "marker"}}}\n',
     )
@@ -50,6 +54,14 @@ def main():
     credentials = os.path.join(owner_dir, ".credentials.json")
     assert os.path.islink(credentials)
     assert os.path.realpath(credentials) == os.path.join(TMP, ".claude", ".credentials.json")
+    migrated_session = os.path.join(owner_dir, "projects", "-tmp", "legacy-session.jsonl")
+    assert open(migrated_session, encoding="utf-8").read() == "legacy conversation\n"
+    _write(
+        os.path.join(TMP, ".claude", "projects", "-tmp", "later-session.jsonl"),
+        "must not overwrite the tenant copy\n",
+    )
+    runtime.account_dir(runtime.OWNER_ID)
+    assert not os.path.exists(os.path.join(owner_dir, "projects", "-tmp", "later-session.jsonl"))
 
     sent = []
     documents = []

@@ -318,6 +318,21 @@ def ensure_owner_mcp_config():
     _ensure_tenant_mcp_config(account_dir(OWNER_ID))
 
 
+def _migrate_owner_projects(owner_dir):
+    """Copy legacy Claude project sessions once into the owner's tenant home.
+
+    Session UUIDs in bridge state reference JSONL files below
+    ``~/.claude/projects``.  Moving only config/persona makes every existing
+    ``--resume`` fail after the bridge begins passing a tenant
+    ``CLAUDE_CONFIG_DIR``.  Preserve the legacy source and never overwrite a
+    tenant project directory that has already been created.
+    """
+    source = os.path.join(default_claude_config_dir(), "projects")
+    destination = os.path.join(owner_dir, "projects")
+    if os.path.isdir(source) and not os.path.exists(destination):
+        shutil.copytree(source, destination, copy_function=shutil.copy2)
+
+
 def account_dir(chat_id, state_key=None):
     delegated = state_key is not None and str(state_key) != str(chat_id)
     if delegated:
@@ -356,6 +371,7 @@ def account_dir(chat_id, state_key=None):
             os.path.join(d, ".credentials.json"),
             os.path.join(default_claude_config_dir(), ".credentials.json"),
         )
+        _migrate_owner_projects(d)
     # Idempotent (marker-guarded, append-only if missing) for everyone,
     # owner included -- without it, the owner's migrated CLAUDE.md has no
     # working knowledge of the send-telegram-file MCP tool it was just
