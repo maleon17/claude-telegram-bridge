@@ -151,11 +151,9 @@ current_offset = [0]
 state_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
-# Multi-tenant accounts: each whitelisted chat_id other than OWNER_ID gets its
-# own isolated CLAUDE_CONFIG_DIR (own OAuth login, own Pro subscription, own
-# sessions/usage) instead of running on OWNER_ID's account. OWNER_ID keeps
-# using the default, unisolated `~/.claude` it always has, so existing state
-# is untouched.
+# Multi-tenant accounts: each chat, including OWNER_ID, gets an isolated
+# CLAUDE_CONFIG_DIR.  The owner's first account creation migrates their live
+# persona/MCP configuration and shares only the OAuth credentials by symlink.
 # ---------------------------------------------------------------------------
 
 WHITELIST_FILE = os.path.join(
@@ -317,7 +315,7 @@ def _ensure_tenant_mcp_config(config_dir):
 
 
 def ensure_owner_mcp_config():
-    _ensure_tenant_mcp_config(default_claude_config_dir())
+    _ensure_tenant_mcp_config(account_dir(OWNER_ID))
 
 
 def account_dir(chat_id, state_key=None):
@@ -325,21 +323,43 @@ def account_dir(chat_id, state_key=None):
     if delegated:
         d = os.path.join(DELEGATED_ACCOUNTS_DIR, str(chat_id))
         os.makedirs(d, mode=0o700, exist_ok=True)
-        shared_dir = account_dir(chat_id) or default_claude_config_dir()
+        shared_dir = account_dir(chat_id)
         # OAuth is live state: share it by symlink so token refreshes remain
         # visible, while sessions/projects/history stay in the delegate dir.
         credentials = os.path.join(shared_dir, ".credentials.json")
         _ensure_symlink(os.path.join(d, ".credentials.json"), credentials)
         return d
-    if str(chat_id) == str(OWNER_ID):
-        return None  # default ~/.claude, unchanged behavior
     d = os.path.join(ACCOUNTS_DIR, str(chat_id))
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(d, mode=0o700, exist_ok=True)
     claude_md = os.path.join(d, "CLAUDE.md")
+    owner = str(chat_id) == str(OWNER_ID)
     if not os.path.exists(claude_md):
         repo_dir = os.path.dirname(os.path.abspath(__file__))
-        shutil.copyfile(os.path.join(repo_dir, "personality.example.md"), claude_md)
-        shutil.copyfile(os.path.join(repo_dir, "HANDOFF.md"), os.path.join(d, "handoff.md"))
+        persona_source = (
+            os.path.join(default_claude_config_dir(), "CLAUDE.md")
+            if owner else os.path.join(repo_dir, "personality.example.md")
+        )
+        if os.path.exists(persona_source):
+            shutil.copyfile(persona_source, claude_md)
+        else:
+            # Keep a usable owner account even if the prior optional persona
+            # file did not exist; ordinary tenants retain the existing template.
+            open(claude_md, "w", encoding="utf-8").close()
+        if owner:
+            source_config = os.path.expanduser("~/.claude.json")
+            if os.path.exists(source_config):
+                shutil.copyfile(source_config, os.path.join(d, ".claude.json"))
+        else:
+            shutil.copyfile(os.path.join(repo_dir, "HANDOFF.md"), os.path.join(d, "handoff.md"))
+    if owner:
+        _ensure_symlink(
+            os.path.join(d, ".credentials.json"),
+            os.path.join(default_claude_config_dir(), ".credentials.json"),
+        )
+    # Idempotent (marker-guarded, append-only if missing) for everyone,
+    # owner included -- without it, the owner's migrated CLAUDE.md has no
+    # working knowledge of the send-telegram-file MCP tool it was just
+    # given access to. This does not touch the rest of a /persona rewrite.
     _ensure_tenant_file_send_instructions(claude_md)
     _ensure_tenant_mcp_config(d)
     return d

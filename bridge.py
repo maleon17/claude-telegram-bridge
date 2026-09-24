@@ -43,7 +43,7 @@ from chat_process import (
     _stop_chat_process, write_request_result,
 )
 from handlers import (
-    cancel_pending_batch, handle_callback_query, handle_command, handle_onboarding,
+    cancel_pending_batch, handle_callback_query, handle_command, handle_onboarding, handle_persona_reply,
     process_key_for_command, process_key_for_incoming, register_commands, route_prompt,
     spawn_turn, start_delegate_turn,
 )
@@ -597,6 +597,12 @@ def _process_message(msg, state):
     whitelist = load_whitelist()
     onboarding_text = text or caption
     if handle_onboarding(chat_id, user_id, onboarding_text, state, whitelist):
+        return
+
+    # A /persona replacement is authorized by Telegram's reply target, not
+    # by message order or an in-memory dialogue stage, and must never reach
+    # a Claude prompt.
+    if handle_persona_reply(chat_id, msg):
         return
 
     try:
