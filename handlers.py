@@ -10,7 +10,7 @@ import traceback
 from urllib.parse import urlsplit
 
 from runtime import (
-    BATCH_DEBOUNCE_S, CLAUDE_BIN, DRAINING_TEXT, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir,
+    BATCH_DEBOUNCE_S, CLAUDE_BIN, DRAINING_TEXT, MAX_MSG_LEN, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir,
     batch_timers, busy_chats, claude_env, draining, intake_active, intake_queues, intake_lock, load_whitelist,
     pending_batch_generations, pending_batches, pending_batches_lock, pending_logins,
 )
@@ -26,7 +26,9 @@ from state_store import (
 from chat_process import (
     _stop_chat_process, send_turn_to_chat_process, write_last_turn, write_request_result,
 )
-from telegram_api import edit_message, send_message, send_typing, tg_call
+from telegram_api import (
+    download_telegram_file, edit_message, send_document, send_message, send_typing, tg_call,
+)
 from telegram_format import format_message
 
 MODEL_CATALOG = [
@@ -58,6 +60,9 @@ BATCH_RETRY_S = 0.2
 # memory: api_id/api_hash must never reach state.json or a Claude prompt.
 pending_local_bot_api_setups = {}
 pending_local_bot_api_setups_lock = threading.Lock()
+# chat_id -> ids of messages/files sent by /persona.  Reply identity, rather
+# than a "next message" state machine, is the authorization boundary.
+persona_message_ids = {}
 
 
 def _model_for_id(model_id):
@@ -479,12 +484,117 @@ def _handle_local_bot_api_setup_reply(chat_id, text):
     return False
 
 
+def _persona_path(chat_id):
+    return os.path.join(account_dir(chat_id), "CLAUDE.md")
+
+
+def _write_persona(path, contents):
+    directory = os.path.dirname(path)
+    fd, temporary = tempfile.mkstemp(prefix=".persona.", dir=directory, text=True)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _remember_persona_message(chat_id, result):
+    if result.get("ok"):
+        message_id = (result.get("result") or {}).get("message_id")
+        if isinstance(message_id, int):
+            persona_message_ids.setdefault(str(chat_id), set()).add(message_id)
+
+
+def send_persona(chat_id):
+    """Send the current persona as one text message or a UTF-8 Markdown file."""
+    path = _persona_path(chat_id)
+    with open(path, encoding="utf-8") as handle:
+        contents = handle.read()
+    if len(format_message(contents)) <= MAX_MSG_LEN:
+        result = send_message(chat_id, contents)
+    else:
+        fd, temporary = tempfile.mkstemp(prefix="persona-", suffix=".md", text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(contents)
+            result = send_document(chat_id, temporary, caption="Текущая персона")
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    _remember_persona_message(chat_id, result)
+    return result
+
+
+def handle_persona_reply(chat_id, message):
+    """Replace an owner persona only for a reply to a /persona snapshot."""
+    if str(chat_id) != str(OWNER_ID):
+        return False
+    reply = message.get("reply_to_message") or {}
+    reply_id = reply.get("message_id") or message.get("reply_to_message_id")
+    if reply_id not in persona_message_ids.get(str(chat_id), set()):
+        return False
+    document = message.get("document") or {}
+    if document:
+        try:
+            local_path = download_telegram_file(
+                chat_id, document["file_id"], filename_hint=document.get("file_name"),
+                file_size=document.get("file_size"),
+            )
+            with open(local_path, encoding="utf-8") as handle:
+                contents = handle.read()
+        except UnicodeDecodeError:
+            send_message(chat_id, "Файл персоны должен быть текстовым UTF-8 Markdown-файлом.")
+            return True
+        except Exception as exc:
+            send_message(chat_id, f"Не удалось прочитать файл персоны: {exc}")
+            return True
+    else:
+        contents = message.get("text")
+        if not isinstance(contents, str):
+            send_message(chat_id, "Пришли текст персоны или UTF-8 Markdown-файл ответом на сообщение.")
+            return True
+    if not contents.strip():
+        send_message(chat_id, "Пустая персона не сохранена.")
+        return True
+    _write_persona(_persona_path(chat_id), contents)
+    send_message(chat_id, "✅ Персона обновлена.")
+    return True
+
+
 def handle_command(chat_id, text, state, offset=None):
     cmd, _, arg = text.partition(" ")
     cmd = cmd.lower().strip().lstrip("/.")
     arg = arg.strip()
 
     if cmd == "start":
+        return True
+
+    if cmd == "persona":
+        if str(chat_id) != str(OWNER_ID):
+            send_message(chat_id, "Персона доступна только владельцу в личном чате.")
+            return True
+        if arg.lower() == "reset":
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "personality.example.md"), encoding="utf-8") as handle:
+                _write_persona(_persona_path(chat_id), handle.read())
+            send_message(chat_id, "✅ Персона сброшена к шаблону по умолчанию.")
+        elif arg:
+            send_message(chat_id, "Использование: /persona или /persona reset")
+        else:
+            send_persona(chat_id)
         return True
 
     if cmd == "new":
