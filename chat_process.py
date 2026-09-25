@@ -897,6 +897,27 @@ def _stop_chat_process(chat_id):
         pass
 
 
+def _finalize_orphaned_progress_message(chat_id, telegram_chat_id):
+    """A "downloading attachment" progress message (see bridge.py) is
+    normally recycled into the new turn's own progress message by
+    _new_turn_accumulator -- but that only runs when a FRESH process
+    starts. If chat_id already has a live process, this prompt is about
+    to be injected (live-steering) into that in-progress turn instead,
+    and no new accumulator will ever run to pick the message up -- left
+    alone it would sit showing "downloading..." for the rest of that
+    turn, however long it takes. Finalize it here instead."""
+    with pending_progress_lock:
+        msg_id = pending_progress_msg_ids.pop(chat_id, None)
+    if msg_id is not None:
+        tg_call(
+            "editMessageText",
+            {
+                "chat_id": telegram_chat_id, "message_id": msg_id,
+                "text": t('chat_process_attachment_merged'),
+            },
+        )
+
+
 def _ensure_chat_process(
     chat_id, model, effort, permission_mode, workspace, config_dir, state,
     output_chat_id=None, delegated=False, extra_env=None,
@@ -916,6 +937,7 @@ def _ensure_chat_process(
         and record["proc"].poll() is None
         and record["signature"] == wanted_sig
     ):
+        _finalize_orphaned_progress_message(chat_id, output_chat_id or chat_id)
         return record
     if record:
         _stop_chat_process(chat_id)
