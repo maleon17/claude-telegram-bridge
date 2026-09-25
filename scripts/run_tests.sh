@@ -18,6 +18,7 @@ for test in breaker_tests/test_*.py; do
     # Tests must never inherit the live bridge's identity or state.
     if output="$(env -u CHAT_ID -u SERVICE_NAME -u BRIDGE_STATE_FILE -u TELEGRAM_API_URL \
             -u BRIDGE_ENV_FILE -u TELEGRAM_BOT_API_ENV_FILE -u TELEGRAM_BOT_API_UNIT \
+            -u CLAUDE_CONFIG_DIR \
             timeout 300 python3 "$test" 2>&1)"; then
         if grep -q '^SKIP:' <<<"$output"; then
             echo "SKIP  $test"

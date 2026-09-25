@@ -12,6 +12,7 @@ import tempfile
 
 TMP = tempfile.mkdtemp(prefix="breaker_persona_claude_")
 os.environ["HOME"] = TMP
+os.environ.pop("CLAUDE_CONFIG_DIR", None)
 os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxxxxxxxxxx"
 os.environ["OWNER_ID"] = "1000000001"
 os.environ["BRIDGE_STATE_FILE"] = os.path.join(TMP, "state.json")
