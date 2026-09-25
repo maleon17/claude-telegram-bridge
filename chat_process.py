@@ -7,7 +7,7 @@ import threading
 import time
 import traceback
 
-from strings import t
+from strings import current_language, t
 
 from runtime import (
     CHAT_PROC_IDLE_TIMEOUT_S, CLAUDE_BIN, EDIT_THROTTLE_S, EXTERNAL_RESULT_DIR, STATE_FILE,
@@ -15,7 +15,7 @@ from runtime import (
     chat_procs_lock, claude_env, pending_progress_lock, pending_progress_msg_ids,
 )
 from state_store import (
-    add_usage, clear_pending_prompt, get_pending_delegator, get_session,
+    _set_chat_language, add_usage, clear_pending_prompt, get_pending_delegator, get_session,
     pending_deliveries, pop_delegate_request_id, reset_cost_warning_baseline,
     set_pending_delegator,
     set_pending_delivery, set_pending_prompt, set_session,
@@ -111,6 +111,8 @@ def deliver_pending_final(state, state_key, delivery):
     Only one delivery per state key runs at a time, so the retry loop can
     never duplicate an attempt the finishing turn is still making. Returns
     True once every chunk has been acknowledged by Telegram."""
+    if delivery.get("chat_id") is not None:
+        _set_chat_language(state, delivery["chat_id"])
     with _delivery_guard:
         if state_key in _delivering_keys:
             return False
@@ -336,7 +338,7 @@ def _flush_draft(chat_id, ts, force=False):
         ts["last_draft_edit"] = now
 
 
-def _compact_draft_watchdog(chat_id, ts):
+def _compact_draft_watchdog(chat_id, ts, language="ru"):
     """Refreshes the "🗜 Сжимаю контекст..." progress message every 15s
     with an updated elapsed-time counter for as long as a real compaction
     is running (a real persisted message -- see _flush_draft -- doesn't
@@ -344,6 +346,7 @@ def _compact_draft_watchdog(chat_id, ts):
     a live counter rather than something keeping the message from vanishing).
     Exits as soon as ts["compact_done_event"] is set (compact_result
     arrived) or, as a belt-and-suspenders cap, after 20 minutes."""
+    current_language.set(language)
     start = time.time()
     done = ts["compact_done_event"]
     while not done.wait(timeout=15):
@@ -364,6 +367,7 @@ def _deliver_turn_result(
     background task finishing on its own, is delivered from
     _chat_reader_loop, not from whoever originally called dispatch_turn."""
     telegram_chat_id = chat_id if output_chat_id is None else output_chat_id
+    _set_chat_language(state, telegram_chat_id)
     log_lines = ts["log_lines"]
     final_text = ts["final_text"]
 
@@ -551,6 +555,7 @@ def _chat_reader_loop(chat_id, state, record):
     this arrives on the same open stdout with zero new stdin input
     needed, which is what makes the old WAKEUP_SIGNAL_DIR workaround
     obsolete for chats running under this model)."""
+    _set_chat_language(state, record.get("telegram_chat_id", chat_id))
     proc = record["proc"]
     telegram_chat_id = record.get("telegram_chat_id", chat_id)
     ts = _new_turn_accumulator(state, chat_id)
@@ -558,6 +563,7 @@ def _chat_reader_loop(chat_id, state, record):
 
     try:
         for raw_line in proc.stdout:
+            _set_chat_language(state, telegram_chat_id)
             raw_line = raw_line.strip()
             if not raw_line:
                 continue
@@ -620,7 +626,7 @@ def _chat_reader_loop(chat_id, state, record):
                     ts["compact_done_event"] = threading.Event()
                     threading.Thread(
                         target=_compact_draft_watchdog,
-                        args=(telegram_chat_id, ts),
+                        args=(telegram_chat_id, ts, current_language.get()),
                         daemon=True,
                     ).start()
                 elif "compact_result" in d:

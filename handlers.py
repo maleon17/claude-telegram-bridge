@@ -1,4 +1,6 @@
 import json
+import glob
+import hashlib
 import os
 import re
 import shutil
@@ -7,23 +9,25 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from urllib.parse import urlsplit
 
-from strings import t
+from strings import COMMAND_DESCRIPTIONS, current_language, t
 
 from runtime import (
-    BATCH_DEBOUNCE_S, CLAUDE_BIN, DRAINING_TEXT, MAX_MSG_LEN, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir,
+    ACCOUNTS_DIR, BATCH_DEBOUNCE_S, CLAUDE_BIN, MAX_MSG_LEN, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir,
     batch_timers, busy_chats, claude_env, draining, intake_active, intake_queues, intake_lock, load_whitelist,
     pending_batch_generations, pending_batches, pending_batches_lock, pending_logins,
+    _write_default_persona_marker,
 )
 from state_store import (
-    clear_pending_prompt, clear_session, delegate_key, fetch_account_limits,
-    get_account_status, get_delegate_resume_selected, get_effort, get_model, get_pending_prompt, get_permission_mode,
+    _set_chat_language, clear_pending_prompt, clear_session, delegate_key, fetch_account_limits,
+    get_account_status, get_delegate_resume_selected, get_effort, get_language, get_model, get_pending_prompt, get_permission_mode,
     get_session, get_usage, get_workspace, list_sessions, pop_delegate_request_id,
     projects_dir_for,
     request_restart, session_message_count, set_account_status, set_effort, set_model,
     set_delegate_request_id, set_delegate_resume_selected, set_pending_delegator, set_permission_mode, set_session,
-    set_workspace,
+    set_workspace, set_language,
 )
 from chat_process import (
     _stop_chat_process, send_turn_to_chat_process, write_last_turn, write_request_result,
@@ -186,24 +190,7 @@ def _delegate_error(chat_id, text, request_id=None):
     else:
         write_last_turn(chat_id, text, delegated=True)
 
-COMMANDS = [
-    ("new", "Начать новую сессию"),
-    ("sessions", "Список последних сессий"),
-    ("resume", "Продолжить сессию по id"),
-    ("status", "Текущее состояние: сессия/модель/режим/workspace"),
-    ("stop", "Прервать текущий запрос"),
-    ("compact", "Сжать контекст текущей сессии (экономит токены/деньги)"),
-    ("usage", "Токены, стоимость и лимиты аккаунта"),
-    ("model", "Модель: /model opus, /model claude-sonnet-5, /model default"),
-    ("effort", "Мощность модели: /effort high, /effort default"),
-    ("mode", "Режим подтверждений: bypass/default/acceptEdits/plan"),
-    ("workspace", "Рабочая директория для этой сессии"),
-    ("approve", "Разрешить заблокированное действие (once/session)"),
-    ("deny", "Отклонить заблокированное действие"),
-    ("login", "Переподключить свой аккаунт Claude"),
-    ("restart", "Перезапустить бота (только для владельца)"),
-    ("update", "Обновить бота из git и перезапустить (только для владельца)"),
-]
+COMMANDS = tuple(COMMAND_DESCRIPTIONS["ru"].items())
 
 
 def _bridge_env_file():
@@ -354,8 +341,9 @@ def _finish_local_bot_api_setup(chat_id, status, error=None):
     request_restart(chat_id)
 
 
-def _run_local_bot_api_install(chat_id, api_id=None, api_hash=None):
+def _run_local_bot_api_install(chat_id, api_id=None, api_hash=None, language="ru"):
     """Run the installer and irreversible switch off the intake worker thread."""
+    current_language.set(language)
     status = {"chat_id": chat_id, "message_id": None}
     output_tail = []
     stage_text = {
@@ -432,7 +420,8 @@ def _start_local_bot_api_install(chat_id, api_id=None, api_hash=None):
             return False
         pending_local_bot_api_setups[chat_id] = {"stage": "installing"}
     threading.Thread(
-        target=_run_local_bot_api_install, args=(chat_id, api_id, api_hash), daemon=True,
+        target=_run_local_bot_api_install,
+        args=(chat_id, api_id, api_hash, current_language.get()), daemon=True,
     ).start()
     return True
 
@@ -487,6 +476,110 @@ def _handle_local_bot_api_setup_reply(chat_id, text):
 
 def _persona_path(chat_id):
     return os.path.join(account_dir(chat_id), "CLAUDE.md")
+
+
+def _language_persona_path(chat_id):
+    """Read an existing persona without account_dir's legacy instruction append."""
+    path = os.path.join(ACCOUNTS_DIR, str(chat_id), "CLAUDE.md")
+    if not os.path.exists(path):
+        account_dir(chat_id)
+    return path
+
+
+LANGUAGE_NAMES = {
+    "en": "English", "ru": "Russian", "uk": "Ukrainian",
+    "kk": "Kazakh", "de": "German",
+}
+
+
+def _persona_template(language):
+    name = "personality.example.md" if language == "ru" else f"personality.example.{language}.md"
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _persona_is_default(chat_id):
+    path = _language_persona_path(chat_id)
+    marker = os.path.join(os.path.dirname(path), ".persona_default_sha256")
+    try:
+        with open(path, "rb") as handle:
+            contents = handle.read()
+        with open(marker, encoding="ascii") as handle:
+            digest = handle.read().strip()
+    except (OSError, UnicodeError):
+        return False
+    return hashlib.sha256(contents).hexdigest() == digest
+
+
+def _seed_default_persona(chat_id, language):
+    path = _language_persona_path(chat_id)
+    contents = _persona_template(language)
+    _write_persona(path, contents)
+    _write_default_persona_marker(os.path.dirname(path), contents.encode("utf-8"))
+
+
+def _translate_persona_file(chat_id, target_lang, state):
+    """Translate with the tenant's Claude account and remove only this call's session."""
+    path = _language_persona_path(chat_id)
+    with open(path, encoding="utf-8") as handle:
+        original = handle.read()
+    if not original.strip():
+        raise ValueError("persona is empty")
+    tenant_dir = os.path.dirname(path)
+    language = LANGUAGE_NAMES[target_lang]
+    prompt = (
+        f"Translate the following CLAUDE.md content into {language}. Preserve its "
+        "structure, tone and meaning faithfully; do not summarize or reword. "
+        f"If it instructs the agent to always answer in a named language, change "
+        f"that instruction to always answer in {language}. Output only the "
+        "translated file content, with no commentary, code fences or extra text. "
+        "Do not use tools or access files. The source text follows:\n\n" + original
+    )
+    session_id = str(uuid.uuid4())
+    command = [
+        CLAUDE_BIN, "-p", "--output-format", "json",
+        "--permission-mode", "plan", "--permission-prompts", "none",
+        "--strict-mcp-config", "--tools", "",
+        "--session-id", session_id,
+    ]
+    model = get_model(state, chat_id)
+    if model:
+        command.extend(("--model", model))
+    try:
+        result = subprocess.run(
+            command, input=prompt, capture_output=True, text=True,
+            timeout=180, check=False, cwd=tenant_dir, env=claude_env(tenant_dir),
+        )
+        if result.returncode:
+            raise RuntimeError((result.stderr or result.stdout or "Claude failed").strip()[-500:])
+        translated = json.loads(result.stdout).get("result", "").strip()
+    finally:
+        # Claude can choose its own sanitized project directory. The UUID is
+        # unique to this invocation; never remove another session's file.
+        for session_path in glob.glob(
+            os.path.join(tenant_dir, "projects", "**", f"{session_id}.jsonl"),
+            recursive=True,
+        ):
+            os.unlink(session_path)
+    refusal = re.match(r"(?i)^(?:sorry|i cannot|i can't|unable to)\b", translated)
+    original_has_headings = any(line.startswith("#") for line in original.splitlines())
+    translated_has_headings = any(line.startswith("#") for line in translated.splitlines())
+    if (len(translated) < max(12, len(original.strip()) // 3)
+            or translated.startswith("```") or translated.endswith("```")
+            or refusal or (original_has_headings and not translated_has_headings)):
+        raise ValueError("Claude returned incomplete persona content")
+    _write_persona(path, translated + "\n")
+
+
+def _finish_language_message(chat_id, progress, message):
+    message_id = (progress.get("result") or {}).get("message_id") if progress and progress.get("ok") else None
+    if isinstance(message_id, int):
+        try:
+            if edit_message(chat_id, message_id, message).get("ok"):
+                return
+        except Exception as exc:
+            print(f"chat={chat_id} could not edit language progress: {exc}", flush=True)
+    send_message(chat_id, message)
 
 
 def _write_persona(path, contents):
@@ -577,6 +670,7 @@ def handle_persona_reply(chat_id, message):
 
 
 def handle_command(chat_id, text, state, offset=None):
+    _set_chat_language(state, chat_id)
     cmd, _, arg = text.partition(" ")
     cmd = cmd.lower().strip().lstrip("/.")
     arg = arg.strip()
@@ -584,13 +678,33 @@ def handle_command(chat_id, text, state, offset=None):
     if cmd == "start":
         return True
 
+    if cmd == "language":
+        code = arg.lower()
+        if code not in LANGUAGE_NAMES:
+            send_message(chat_id, t('language_usage'))
+            return True
+        set_language(state, chat_id, code)
+        current_language.set(code)
+        set_chat_commands(chat_id, code)
+        progress = send_message(chat_id, t('language_progress'))
+        try:
+            if _persona_is_default(chat_id):
+                _seed_default_persona(chat_id, code)
+            else:
+                _translate_persona_file(chat_id, code, state)
+        except Exception as exc:
+            print(f"chat={chat_id} persona language switch failed: {exc}", flush=True)
+            _finish_language_message(chat_id, progress, t('language_persona_failed', error=str(exc)[-500:]))
+            return True
+        _finish_language_message(chat_id, progress, t('language_changed'))
+        return True
+
     if cmd == "persona":
         if str(chat_id) != str(OWNER_ID):
             send_message(chat_id, t('handlers_handle_command_1'))
             return True
         if arg.lower() == "reset":
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "personality.example.md"), encoding="utf-8") as handle:
-                _write_persona(_persona_path(chat_id), handle.read())
+            _seed_default_persona(chat_id, get_language(state, chat_id))
             send_message(chat_id, t('handlers_handle_command_2'))
         elif arg:
             send_message(chat_id, t('handlers_handle_command_3'))
@@ -699,35 +813,35 @@ def handle_command(chat_id, text, state, offset=None):
             return f"{n:,}".replace(",", " ")
 
         lines = [
-            "📊 **Session**",
+            t('usage_session_header'),
             t('handlers_handle_command_14', value0=session_id[:8] if session_id else t('handlers_handle_command_15'), value1=model, value2=_effort_label(get_model(state, chat_id), effort)),
-            f"Messages: {msg_count if msg_count is not None else '—'}",
+            t('usage_messages', count=msg_count if msg_count is not None else '—'),
             (
-                f"Context: ~{fmt(context_tokens)} tokens"
+                t('usage_context', count=fmt(context_tokens))
                 if context_tokens
-                else "Context: no data yet"
+                else t('usage_context_empty')
             ),
             "",
-            "🔢 **Tokens (this session)**",
-            f"{u['calls']} calls",
-            f"in {fmt(u['input_tokens'])}  ·  out {fmt(u['output_tokens'])}  ·  "
-            f"cache-r {fmt(u['cache_read_tokens'])}  ·  cache-w {fmt(u['cache_creation_tokens'])}",
+            t('usage_tokens_header'),
+            t('usage_calls', count=u['calls']),
+            t('usage_tokens_line', input=fmt(u['input_tokens']), output=fmt(u['output_tokens']),
+              cache_read=fmt(u['cache_read_tokens']), cache_write=fmt(u['cache_creation_tokens'])),
             t('handlers_handle_command_16', value0=u['cost_usd']),
         ]
 
         by_model = u.get("by_model") or {}
         if by_model:
             lines.append("")
-            lines.append("**By model**")
+            lines.append(t('usage_by_model'))
             for name, mu in by_model.items():
                 lines.append(
-                    f"`{name}`  {fmt(mu['input_tokens'])}/{fmt(mu['output_tokens'])} in/out  "
-                    f"(~${mu['cost_usd']:.4f})"
+                    t('usage_model_line', name=name, input=fmt(mu['input_tokens']),
+                      output=fmt(mu['output_tokens']), cost=mu['cost_usd'])
                 )
 
         limits = fetch_account_limits(account_dir(chat_id))
         lines.append("")
-        lines.append("📈 **Account limits** (subscription, not credits)")
+        lines.append(t('usage_limits_header'))
         for ln in limits.splitlines():
             lines.append(ln)
 
@@ -831,7 +945,7 @@ def handle_command(chat_id, text, state, offset=None):
             t('handlers_handle_command_35', value0=session_id[:8] if session_id else t('handlers_handle_command_15')),
             t('handlers_handle_command_36', value0=model, value1=effort),
             t('handlers_handle_command_37', value0=mode),
-            f"Workspace: `{workspace}`",
+            t('status_workspace', workspace=workspace),
             t('handlers_handle_command_38', value0=busy),
             t('handlers_handle_command_39', value0=acc),
         ]
@@ -922,14 +1036,35 @@ def handle_command(chat_id, text, state, offset=None):
 # ---------------------------------------------------------------------------
 
 
-def register_commands():
-    payload = {"commands": [{"command": c, "description": d} for c, d in COMMANDS]}
-    tg_call("setMyCommands", payload)
-    # Some hosts (e.g. this bot token was previously used by the official
-    # Channels plugin) have a stale all_private_chats scope registered,
-    # which takes precedence over the default scope in private chats and
-    # would otherwise mask our command list. Overwrite it explicitly.
-    tg_call("setMyCommands", {**payload, "scope": {"type": "all_private_chats"}})
+def _command_payload(language):
+    descriptions = COMMAND_DESCRIPTIONS[language]
+    return {"commands": [
+        {"command": command, "description": descriptions[command]} for command, _ in COMMANDS
+    ]}
+
+
+def set_chat_commands(chat_id, language):
+    tg_call("setMyCommands", {
+        **_command_payload(language), "scope": {"type": "chat", "chat_id": chat_id},
+    })
+
+
+def register_commands(state=None):
+    for language in COMMAND_DESCRIPTIONS:
+        payload = _command_payload(language)
+        for scope in (None, {"type": "all_private_chats"}):
+            params = {**payload, "language_code": language}
+            if scope:
+                params["scope"] = scope
+            tg_call("setMyCommands", params)
+            if language == "ru":
+                tg_call("setMyCommands", {**payload, **({"scope": scope} if scope else {})})
+    if state is not None:
+        for chat_id, data in state.items():
+            if str(chat_id).isdecimal() and isinstance(data, dict):
+                language = data.get("language", "ru")
+                if language in COMMAND_DESCRIPTIONS:
+                    set_chat_commands(int(chat_id), language)
 
 
 def _run_turn_thread(
@@ -943,6 +1078,7 @@ def _run_turn_thread(
     reach the reader thread to clear it in that case); on success,
     clearing it is _chat_reader_loop's job once it sees this turn's
     "result" event (or the process dying mid-turn)."""
+    _set_chat_language(state, chat_id)
     try:
         dispatch_turn(
             chat_id,
@@ -965,9 +1101,10 @@ def _run_turn_thread(
 
 
 def _refuse_while_draining(output_chat_id, delegated):
-    send_message(output_chat_id, DRAINING_TEXT)
+    message = t('runtime_module_1')
+    send_message(output_chat_id, message)
     if delegated:
-        write_last_turn(output_chat_id, DRAINING_TEXT, delegated=True, ok=False)
+        write_last_turn(output_chat_id, message, delegated=True, ok=False)
 
 
 def spawn_turn(
@@ -1028,6 +1165,7 @@ def start_delegate_turn(
     resume id deliberately tears down any idle delegate process and clears
     its session so every default delegation starts a fresh conversation.
     """
+    _set_chat_language(state, chat_id)
     delegate_process = delegate_key(chat_id)
     requested_session_id = str(resume_session_id or "").strip() or None
     requested_env = dict(env or {})
@@ -1150,6 +1288,7 @@ def cancel_pending_batch(chat_id):
 
 
 def _flush_pending_batch(chat_id, state, generation):
+    _set_chat_language(state, chat_id)
     # Taking the batch and reserving the chat happen under intake_lock, so a
     # deferred restart can never observe the gap between them as "idle".
     retry_timer = None
@@ -1256,6 +1395,7 @@ def dispatch_turn(
     settings_chat_id = chat_id if delegated else telegram_chat_id
     send_typing(telegram_chat_id)
 
+    _set_chat_language(state, output_chat_id or chat_id)
     model = get_model(state, settings_chat_id)
     effort = get_effort(state, settings_chat_id)
     permission_mode = force_permission_mode or get_permission_mode(state, settings_chat_id)
@@ -1342,6 +1482,7 @@ def start_login(chat_id, state, delegated=False):
     Every chat logs into its isolated account directory. ``/login delegate``
     authenticates the separate home used by delegated turns.
     """
+    _set_chat_language(state, chat_id)
     target_key = delegate_key(chat_id) if delegated else chat_id
     config_dir = account_dir(chat_id, state_key=target_key)
     login_dir = config_dir or os.path.join(os.path.dirname(__file__), "login")
@@ -1376,6 +1517,7 @@ def start_login(chat_id, state, delegated=False):
     set_account_status(state, target_key, "awaiting_code")
 
     def reader():
+        _set_chat_language(state, chat_id)
         deadline = time.time() + LOGIN_TIMEOUT_S
         url_seen = False
         try:
@@ -1425,6 +1567,7 @@ def feed_login_code(chat_id, code, state):
         return False
 
     def check():
+        _set_chat_language(state, chat_id)
         time.sleep(3)
         for _ in range(10):
             try:
@@ -1467,6 +1610,7 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
     """Returns True if this update was fully handled here (whitelist prompt /
     login kickoff / code consumption) and the main loop should move on.
     Returns False if the account is ready and normal dispatch should proceed."""
+    _set_chat_language(state, chat_id)
     if str(user_id) not in whitelist:
         send_whitelist_prompt(chat_id)
         return True
@@ -1507,10 +1651,13 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
         if tenant_dir:
             claude_md = os.path.join(tenant_dir, "CLAUDE.md")
             if os.path.exists(claude_md):
+                was_default = _persona_is_default(chat_id)
                 with open(claude_md, encoding="utf-8") as f:
                     personality = f.read()
-                with open(claude_md, "w", encoding="utf-8") as f:
-                    f.write(personality.replace("<user>", (text or "").strip()))
+                updated = personality.replace("<user>", (text or "").strip())
+                _write_persona(claude_md, updated)
+                if was_default:
+                    _write_default_persona_marker(tenant_dir, updated.encode("utf-8"))
         set_account_status(state, chat_id, "ready")
         send_message(chat_id, t('handlers_handle_onboarding_4'))
         return True
@@ -1524,6 +1671,8 @@ def handle_callback_query(cq, state):
     data = cq.get("data")
     from_id = cq.get("from", {}).get("id")
     chat_id = cq.get("message", {}).get("chat", {}).get("id")
+    if chat_id:
+        _set_chat_language(state, chat_id)
     if not chat_id or data != "check_whitelist":
         answer_callback_query(cq["id"])
         return

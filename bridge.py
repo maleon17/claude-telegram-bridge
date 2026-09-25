@@ -24,10 +24,10 @@ import time
 import traceback
 from collections import deque
 
-from strings import t
+from strings import current_language, t
 
 from runtime import (
-    DRAINING_TEXT, EXTERNAL_REQUEST_DIR, EXTERNAL_REQUEST_FILE, FILE_SEND_MAX_CAPTION_CHARS,
+    EXTERNAL_REQUEST_DIR, EXTERNAL_REQUEST_FILE, FILE_SEND_MAX_CAPTION_CHARS,
     FILE_SEND_QUEUE_DIR,
     FILE_SEND_RESULT_DIR, LOCAL_BOT_API, MAX_DOCUMENT_BYTES, OWNER_ID, RESTART_SIGNAL_FILE,
     SERVICE_NAME, WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset, draining,
@@ -35,7 +35,7 @@ from runtime import (
     pending_batches, pending_progress_lock, pending_progress_msg_ids, tenant_file_outbox,
 )
 from state_store import (
-    clear_pending_prompt, get_account_status, get_pending_prompt, load_state,
+    _set_chat_language, clear_pending_prompt, get_account_status, get_pending_prompt, load_state,
     pending_prompt_is_current,
     pop_pending_restart, pop_restart_request, set_pending_restart,
     set_permission_mode,
@@ -90,13 +90,14 @@ def _file_in_tenant_outbox(chat_id, path):
     return source
 
 
-def _file_send_watcher_loop():
+def _file_send_watcher_loop(state=None):
     """Deliver tenant MCP outbox files with the bridge-owned Telegram token."""
     os.makedirs(FILE_SEND_QUEUE_DIR, mode=0o700, exist_ok=True)
     os.makedirs(FILE_SEND_RESULT_DIR, mode=0o700, exist_ok=True)
     while True:
         time.sleep(0.5)
         for request_path in sorted(glob.glob(os.path.join(FILE_SEND_QUEUE_DIR, "*.json"))):
+            current_language.set("ru")
             request_id = os.path.splitext(os.path.basename(request_path))[0]
             try:
                 with open(request_path, encoding="utf-8") as handle:
@@ -116,6 +117,8 @@ def _file_send_watcher_loop():
                 result_text = t('bridge_file_send_watcher_loop_1')
             else:
                 chat_id = request.get("chat_id")
+                if isinstance(chat_id, int) and not isinstance(chat_id, bool):
+                    _set_chat_language(state if state is not None else load_state(), chat_id)
                 path = request.get("path")
                 caption = request.get("caption", "")
                 if not isinstance(chat_id, int) or isinstance(chat_id, bool):
@@ -307,6 +310,7 @@ def _restart_watcher_loop(state):
                 continue
             draining.set()
         r_chat_id = restart_req["chat_id"]
+        _set_chat_language(state, r_chat_id)
         if not SERVICE_NAME:
             draining.clear()
             send_message(r_chat_id, t('bridge_restart_watcher_loop_1'))
@@ -362,6 +366,7 @@ def _external_request_watcher_loop(state):
         if os.path.exists(EXTERNAL_REQUEST_FILE):
             paths.insert(0, EXTERNAL_REQUEST_FILE)
         for path in paths:
+            current_language.set("ru")
             try:
                 with open(path, encoding="utf-8") as f:
                     request = json.load(f)
@@ -382,6 +387,7 @@ def _external_request_watcher_loop(state):
                 write_request_result(request_id, t('bridge_external_request_watcher_loop_1'), ok=False)
                 continue
             chat_id = request.get("chat_id") or OWNER_ID
+            _set_chat_language(state, chat_id)
             text = request.get("text")
             if not text:
                 write_request_result(request_id, t('bridge_external_request_watcher_loop_2'), ok=False)
@@ -432,6 +438,7 @@ def _cross_delegate_watcher_loop(state):
         time.sleep(0.5)
         pattern = os.path.join(CROSS_DELEGATE_QUEUE_DIR, "*.json")
         for request_path in sorted(glob.glob(pattern)):
+            current_language.set("ru")
             request_id = os.path.splitext(os.path.basename(request_path))[0]
             try:
                 with open(request_path, encoding="utf-8") as handle:
@@ -454,6 +461,8 @@ def _cross_delegate_watcher_loop(state):
                 result_text = t('bridge_cross_delegate_watcher_loop_1')
             else:
                 chat_id = request.get("chat_id")
+                if isinstance(chat_id, int) and not isinstance(chat_id, bool):
+                    _set_chat_language(state, chat_id)
                 text = request.get("text")
                 if not isinstance(chat_id, int) or isinstance(chat_id, bool):
                     result_text = t('bridge_file_send_watcher_loop_2')
@@ -523,6 +532,7 @@ def _wakeup_watcher_loop(state):
         time.sleep(2)
         for sig in _pop_wakeup_signals():
             chat_id = str(sig["chat_id"])
+            _set_chat_language(state, chat_id)
             note = str(sig["note"]).strip()
             if chat_id in busy_chats:
                 # Chat's mid-conversation right now -- don't collide with
@@ -573,6 +583,7 @@ def _process_message(msg, state):
     commands, downloads, transcription, routing). Runs on the chat's intake
     worker thread, never on the getUpdates thread."""
     chat_id = msg["chat"]["id"]
+    _set_chat_language(state, chat_id)
     user_id = msg.get("from", {}).get("id")
     text = msg.get("text") or ""
     photo = msg.get("photo")
@@ -770,7 +781,8 @@ def _is_urgent_stop(msg, state):
     )
 
 
-def _handle_urgent_stop(chat_id):
+def _handle_urgent_stop(chat_id, state):
+    _set_chat_language(state, chat_id)
     # Interrupting a turn means killing the whole persistent chat process,
     # not just "this turn" (see chat_procs) -- the reader thread's own
     # finally-block delivers the "⏹ Остановлено" message itself; this is just
@@ -796,6 +808,7 @@ def _enqueue_intake(msg, state):
 
 
 def _intake_worker(chat_id, state):
+    _set_chat_language(state, chat_id)
     while True:
         with intake_lock:
             queue = intake_queues.get(chat_id)
@@ -820,10 +833,11 @@ def main():
     state = load_state()
     offset = 0
     print("Claude Telegram bridge starting...", flush=True)
-    register_commands()
+    register_commands(state)
 
     pending_restart = pop_pending_restart(state)
     if pending_restart:
+        _set_chat_language(state, pending_restart["chat_id"])
         edit_message(
             pending_restart["chat_id"], pending_restart["message_id"],
             t('bridge_main_1'),
@@ -837,7 +851,7 @@ def main():
     threading.Thread(target=_restart_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_external_request_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_cross_delegate_watcher_loop, args=(state,), daemon=True).start()
-    threading.Thread(target=_file_send_watcher_loop, daemon=True).start()
+    threading.Thread(target=_file_send_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_wakeup_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_chat_proc_idle_reaper_loop, daemon=True).start()
     threading.Thread(target=_pending_delivery_watcher_loop, args=(state,), daemon=True).start()
@@ -867,6 +881,9 @@ def main():
 
             cq = update.get("callback_query")
             if cq:
+                cq_chat_id = cq.get("message", {}).get("chat", {}).get("id")
+                if cq_chat_id:
+                    _set_chat_language(state, cq_chat_id)
                 try:
                     handle_callback_query(cq, state)
                 except Exception:
@@ -876,6 +893,7 @@ def main():
             msg = update.get("message")
             if not msg:
                 continue
+            _set_chat_language(state, msg["chat"]["id"])
             urgent_stop = _is_urgent_stop(msg, state)
             with intake_lock:
                 refused = draining.is_set()
@@ -887,9 +905,9 @@ def main():
                     else:
                         _enqueue_intake(msg, state)
             if refused:
-                send_message(msg["chat"]["id"], DRAINING_TEXT)
+                send_message(msg["chat"]["id"], t('runtime_module_1'))
             elif urgent_stop:
-                _handle_urgent_stop(msg["chat"]["id"])
+                _handle_urgent_stop(msg["chat"]["id"], state)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 import glob
 import json
 import os
+import re
 import subprocess
 import time
 
-from strings import t
+from strings import current_language, t
 
 from runtime import (
     CLAUDE_BIN, COST_WARNING_USD, OWNER_ID, PROJECTS_DIR, RESTART_SIGNAL_FILE,
@@ -21,6 +22,20 @@ def _chat_state(state, chat_id):
     entry = state.setdefault(str(chat_id), {})
     entry.setdefault("language", "ru")
     return entry
+
+
+def get_language(state, chat_id):
+    return state.get(str(chat_id).removeprefix(DELEGATE_KEY_PREFIX), {}).get("language", "ru")
+
+
+def _set_chat_language(state, chat_id):
+    current_language.set(get_language(state, chat_id))
+
+
+def set_language(state, chat_id, language):
+    with state_lock:
+        _chat_state(state, chat_id)["language"] = language
+        save_state(state)
 
 
 def delegate_key(chat_id):
@@ -390,6 +405,27 @@ def pop_restart_request():
     return info
 
 
+_LIMIT_MONTHS = {month: index for index, month in enumerate(
+    ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1
+)}
+
+
+def _localize_limit_line(line):
+    match = re.fullmatch(
+        r"(Current session|Current week(?: \(all models\))?):\s*(\d+)% used\s*[·•]\s*resets\s+(.+)",
+        line,
+    )
+    if not match:
+        return line
+    label = t("account_limit_session" if match.group(1) == "Current session" else "account_limit_week")
+    reset = match.group(3)
+    date = re.fullmatch(r"([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{1,2})(am|pm)(.*)", reset)
+    if date and date.group(1) in _LIMIT_MONTHS:
+        hour = int(date.group(3)) % 12 + (12 if date.group(4) == "pm" else 0)
+        reset = f"{int(date.group(2)):02d}.{_LIMIT_MONTHS[date.group(1)]:02d} {hour:02d}:00{date.group(5)}"
+    return t("account_limit_line", label=label, percent=match.group(2), reset=reset)
+
+
 def fetch_account_limits(config_dir=None):
     """Shell out to Claude Code's own /usage slash command for real account-level
     5-hour/weekly rate limit info. Runs as a standalone call (no --resume) so it
@@ -434,7 +470,7 @@ def fetch_account_limits(config_dir=None):
                     for ln in text.splitlines()
                     if ln.strip().startswith(("Current session", "Current week"))
                 ]
-                return "\n".join(headline) if headline else text
+                return "\n".join(_localize_limit_line(ln) for ln in headline) if headline else text
     except Exception as e:
         return t('state_store_fetch_account_limits_1', value0=e)
     return t('state_store_fetch_account_limits_2')

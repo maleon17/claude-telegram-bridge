@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.error
 import uuid
 import glob
+import hashlib
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -337,6 +338,7 @@ def account_dir(chat_id, state_key=None):
     os.makedirs(d, mode=0o700, exist_ok=True)
     claude_md = os.path.join(d, "CLAUDE.md")
     owner = str(chat_id) == str(OWNER_ID)
+    seeded_default = False
     if not os.path.exists(claude_md):
         repo_dir = os.path.dirname(os.path.abspath(__file__))
         persona_source = (
@@ -345,6 +347,7 @@ def account_dir(chat_id, state_key=None):
         )
         if os.path.exists(persona_source):
             shutil.copyfile(persona_source, claude_md)
+            seeded_default = not owner
         else:
             # Keep a usable owner account even if the prior optional persona
             # file did not exist; ordinary tenants retain the existing template.
@@ -362,8 +365,24 @@ def account_dir(chat_id, state_key=None):
     # working knowledge of the send-telegram-file MCP tool it was just
     # given access to. This does not touch the rest of a /persona rewrite.
     _ensure_tenant_file_send_instructions(claude_md)
+    if seeded_default:
+        with open(claude_md, "rb") as handle:
+            _write_default_persona_marker(d, handle.read())
     _ensure_tenant_mcp_config(d)
     return d
+
+
+def _write_default_persona_marker(tenant_dir, contents):
+    marker = os.path.join(tenant_dir, ".persona_default_sha256")
+    temporary = f"{marker}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "x", encoding="ascii") as handle:
+            handle.write(hashlib.sha256(contents).hexdigest() + "\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, marker)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def tenant_file_outbox(chat_id):
@@ -378,7 +397,9 @@ def _ensure_tenant_file_send_instructions(claude_md):
             content = handle.read()
     except FileNotFoundError:
         return
-    if FILE_SEND_AGENTS_MARKER in content:
+    if FILE_SEND_AGENTS_MARKER in content or (
+        "CLAUDE_TELEGRAM_OUTBOX" in content and "send_telegram_file" in content
+    ):
         return
     with open(claude_md, "w", encoding="utf-8") as handle:
         handle.write(content.rstrip() + "\n\n" + FILE_SEND_AGENTS_SECTION + "\n")

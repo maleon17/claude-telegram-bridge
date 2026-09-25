@@ -5,13 +5,15 @@ Run directly with:
 """
 
 import os
+from collections import Counter
+from string import Formatter
 import sys
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from strings import STRINGS, t  # noqa: E402
+from strings import COMMAND_DESCRIPTIONS, STRINGS, t  # noqa: E402
 
 
 def main():
@@ -28,6 +30,20 @@ def main():
         raise AssertionError("t() must raise KeyError for a key missing even from ru")
 
     assert t("handlers_handle_command_4", lang="xx") == STRINGS["ru"]["handlers_handle_command_4"]
+    source = STRINGS["ru"]
+    formatter = Formatter()
+    assert set(COMMAND_DESCRIPTIONS) == set(STRINGS)
+    for language, translated in STRINGS.items():
+        assert set(translated) == set(source), language
+        assert set(COMMAND_DESCRIPTIONS[language]) == set(COMMAND_DESCRIPTIONS["ru"])
+        assert all(1 <= len(description) <= 256 for description in COMMAND_DESCRIPTIONS[language].values())
+        for key, original in source.items():
+            fields = Counter(field for _, field, _, _ in formatter.parse(original) if field)
+            translated_fields = Counter(field for _, field, _, _ in formatter.parse(translated[key]) if field)
+            assert fields == translated_fields, (language, key)
+            assert original.count("```") == translated[key].count("```"), (language, key)
+            assert original.count("`") == translated[key].count("`"), (language, key)
+            assert original.count("<details>") == translated[key].count("<details>"), (language, key)
 
 
 if __name__ == "__main__":

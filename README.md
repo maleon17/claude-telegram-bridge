@@ -63,11 +63,14 @@ If you'd rather not run a script with `sudo`, do it by hand:
 
 | Command | What it does |
 |---|---|
+| `/language en\|ru\|uk\|kk\|de` | Set this chat's interface and persona language; the Telegram command menu follows the selection |
+| `/persona` / `/persona reset` | Owner-only: show or reset the chat persona |
 | `/new` | Start a new session |
 | `/sessions` | List recent sessions |
 | `/resume <id>` | Resume a session by ID (or prefix) |
 | `/status` | Current session/model/mode/workspace/busy state |
 | `/stop` | Interrupt the request currently running |
+| `/compact` | Compact the current session context |
 | `/usage` | Tokens, cost, and account rate limits |
 | `/model [model]` | Show the model picker, or switch: `/model claude-opus-5`, `/model opus 4.7`, `/model sonnet`, `/model default` |
 | `/effort [level]` | Show or set reasoning effort for the current model: `/effort high`, `/effort default` |

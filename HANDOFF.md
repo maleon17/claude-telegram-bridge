@@ -108,6 +108,11 @@ tenant is created so `/resume` continues to work after migration.
 Delegated turns use another isolated home and require `/login delegate`
 before their first use. The ordinary `/login` authenticates the chat home.
 
+`/language en|ru|uk|kk|de` stores an interface language per chat, updates that
+chat's Telegram command menu, and changes its `CLAUDE.md` persona. Bot-authored
+messages are translated through `strings.py`; customized personas stay isolated
+and are translated without being shared with other tenants.
+
 ## Self-test: adversarial tester + userbot test channel
 
 - **`breaker` subagent** — a Claude Code subagent whose only mandate is to
