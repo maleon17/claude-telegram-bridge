@@ -83,8 +83,12 @@ def main():
         assert handlers.handle_command(runtime.OWNER_ID, "/persona", {})
         # account_dir() idempotently appends the send-telegram-file section
         # (marker-guarded) on every call, including this read -- the owner's
-        # own content must still come through unmodified, as a prefix.
-        assert sent[-1][1].startswith("small current persona")
+        # own content must still come through unmodified, as a prefix. Each
+        # /persona snapshot is followed by a separate how-to-edit message
+        # (2026-09-25: the snapshot alone gave no hint that a reply replaces
+        # the persona or that /persona reset exists).
+        assert sent[-2][1].startswith("small current persona")
+        assert "/persona reset" in sent[-1][1]
         snapshot_id = 72
         assert handlers.handle_persona_reply(runtime.OWNER_ID, {
             "text": "replacement text",
@@ -96,6 +100,7 @@ def main():
         assert handlers.handle_command(runtime.OWNER_ID, "/persona", {})
         assert documents[-1][1].startswith("x" * (runtime.MAX_MSG_LEN + 1))
         assert documents[-1][2] == "Текущая персона"
+        assert "/persona reset" in sent[-1][1]
 
         uploaded = os.path.join(TMP, "uploaded.md")
         _write(uploaded, "file replacement")

@@ -630,6 +630,8 @@ def send_persona(chat_id):
             except FileNotFoundError:
                 pass
     _remember_persona_message(chat_id, result)
+    instructions_result = send_message(chat_id, t('handlers_send_persona_2'))
+    _remember_persona_message(chat_id, instructions_result)
     return result
 
 

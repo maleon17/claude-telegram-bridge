@@ -82,6 +82,7 @@ STRINGS: dict[str, dict[str, str]] = {
         'handlers_handle_local_bot_api_setup_reply_5': 'Пришли api_hash.',
         'handlers_handle_local_bot_api_setup_reply_6': 'Пришли непустой api_hash.',
         'handlers_send_persona_1': 'Текущая персона',
+        'handlers_send_persona_2': 'Ответь на это сообщение новым текстом или .md-файлом — персона заменится целиком. /persona reset — вернуть персону по умолчанию (для текущего языка интерфейса).',
         'handlers_handle_persona_reply_1': 'Файл персоны должен быть текстовым UTF-8 Markdown-файлом.',
         'handlers_handle_persona_reply_2': 'Не удалось прочитать файл персоны: {value0}',
         'handlers_handle_persona_reply_3': 'Пришли текст персоны или UTF-8 Markdown-файл ответом на сообщение.',
@@ -261,6 +262,7 @@ COMMAND_DESCRIPTIONS = {
         "approve": "Разрешить заблокированное действие", "deny": "Отклонить действие",
         "login": "Переподключить аккаунт Claude", "restart": "Перезапустить бота (владелец)",
         "update": "Обновить из Git и перезапустить (владелец)",
+        "persona": "Показать или сбросить персону",
     },
     "en": {
         "language": "Choose interface and persona language", "new": "Start a new session",
@@ -272,6 +274,7 @@ COMMAND_DESCRIPTIONS = {
         "approve": "Approve a blocked action", "deny": "Deny a blocked action",
         "login": "Reconnect your Claude account", "restart": "Restart the bot (owner only)",
         "update": "Update from Git and restart (owner only)",
+        "persona": "Show or reset the persona",
     },
     "uk": {
         "language": "Вибрати мову інтерфейсу й персони", "new": "Почати новий сеанс",
@@ -283,6 +286,7 @@ COMMAND_DESCRIPTIONS = {
         "approve": "Дозволити заблоковану дію", "deny": "Відхилити дію",
         "login": "Повторно підключити акаунт Claude", "restart": "Перезапустити бота (власник)",
         "update": "Оновити з Git і перезапустити (власник)",
+        "persona": "Показати або скинути персону",
     },
     "kk": {
         "language": "Интерфейс пен персона тілін таңдау", "new": "Жаңа сеансты бастау",
@@ -294,6 +298,7 @@ COMMAND_DESCRIPTIONS = {
         "approve": "Бұғатталған әрекетке рұқсат беру", "deny": "Әрекеттен бас тарту",
         "login": "Claude аккаунтын қайта қосу", "restart": "Ботты қайта іске қосу (иесі)",
         "update": "Git-тен жаңартып, қайта іске қосу (иесі)",
+        "persona": "Персонаны көрсету не қалпына келтіру",
     },
     "de": {
         "language": "Sprache für Oberfläche und Persona wählen", "new": "Neue Sitzung starten",
@@ -305,6 +310,7 @@ COMMAND_DESCRIPTIONS = {
         "approve": "Blockierte Aktion genehmigen", "deny": "Blockierte Aktion ablehnen",
         "login": "Claude-Konto erneut verbinden", "restart": "Bot neu starten (nur Inhaber)",
         "update": "Aus Git aktualisieren und neu starten (nur Inhaber)",
+        "persona": "Persona anzeigen oder zurücksetzen",
     },
 }
 
@@ -399,6 +405,12 @@ _COMMAND_OUTPUTS = {
     "bridge_process_message_7": ("Denied.", "Відхилено.", "Қабылданбады.", "Abgelehnt."),
     "bridge_process_message_8": ("Nothing to deny.", "Немає чого відхиляти.", "Бас тартатын әрекет жоқ.", "Nichts zum Ablehnen vorhanden."),
     "handlers_send_persona_1": ("Current persona", "Поточна персона", "Ағымдағы персона", "Aktuelle Persona"),
+    "handlers_send_persona_2": (
+        "Reply to this message with new text or a .md file to replace the persona entirely. /persona reset restores the default persona (for the current interface language).",
+        "Дай відповідь на це повідомлення новим текстом або .md-файлом — персона повністю замінюється. /persona reset повертає персону за замовчуванням (для поточної мови інтерфейсу).",
+        "Персонаны толығымен ауыстыру үшін осы хабарламаға жаңа мәтінмен немесе .md файлымен жауап бер. /persona reset ағымдағы интерфейс тілі үшін әдепкі персонаны қалпына келтіреді.",
+        "Antworte auf diese Nachricht mit neuem Text oder einer .md-Datei, um die Persona vollständig zu ersetzen. /persona reset stellt die Standard-Persona (für die aktuelle Oberflächensprache) wieder her.",
+    ),
     "handlers_handle_persona_reply_1": ("The persona file must be UTF-8 Markdown text.", "Файл персони має бути текстовим Markdown-файлом у UTF-8.", "Персона файлы UTF-8 кодтауындағы Markdown мәтіні болуы керек.", "Die Persona-Datei muss eine UTF-8-Markdown-Textdatei sein."),
     "handlers_handle_persona_reply_2": ("Could not read the persona file: {value0}", "Не вдалося прочитати файл персони: {value0}", "Персона файлын оқу мүмкін болмады: {value0}", "Persona-Datei konnte nicht gelesen werden: {value0}"),
     "handlers_handle_persona_reply_3": ("Reply with persona text or a UTF-8 Markdown file.", "Надішли текст персони або UTF-8 Markdown-файл у відповіді на повідомлення.", "Хабарламаға жауап ретінде персона мәтінін немесе UTF-8 Markdown файлын жібер.", "Antworte mit dem Persona-Text oder einer UTF-8-Markdown-Datei."),
