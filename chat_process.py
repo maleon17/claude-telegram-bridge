@@ -589,13 +589,13 @@ def _chat_reader_loop(chat_id, state, record):
             # cleared.
             busy_chats.add(chat_id)
 
-            t = d.get("type")
+            event_type = d.get("type")
 
-            if t == "system" and d.get("subtype") == "init":
+            if event_type == "system" and d.get("subtype") == "init":
                 ts["current_session_id"] = d.get("session_id") or ts["current_session_id"]
                 continue
 
-            if t == "system" and d.get("subtype") == "status":
+            if event_type == "system" and d.get("subtype") == "status":
                 # /compact (sent like any other prompt, see handle_command)
                 # is a real CLI slash command, not text the model sees --
                 # confirmed live 2026-08-22. It reports through this status
@@ -634,13 +634,13 @@ def _chat_reader_loop(chat_id, state, record):
                         reset_cost_warning_baseline(state, chat_id, ts["current_session_id"])
                 continue
 
-            if t == "stream_event":
+            if event_type == "stream_event":
                 ev = d.get("event", {})
                 if ev.get("type") == "content_block_delta":
                     _flush_draft(telegram_chat_id, ts)
                 continue
 
-            if t == "assistant":
+            if event_type == "assistant":
                 content = d.get("message", {}).get("content", [])
                 # CLI stream-json content is normally a list of typed blocks,
                 # but can be a plain string (seen after /compact) -- nothing
@@ -678,7 +678,7 @@ def _chat_reader_loop(chat_id, state, record):
                 _flush_draft(telegram_chat_id, ts)
                 continue
 
-            if t == "user":
+            if event_type == "user":
                 content = d.get("message", {}).get("content", [])
                 # see the "assistant" branch above for why this guard exists
                 if isinstance(content, str):
@@ -741,7 +741,7 @@ def _chat_reader_loop(chat_id, state, record):
                         _flush_draft(telegram_chat_id, ts, force=True)
                 continue
 
-            if t == "result":
+            if event_type == "result":
                 ts["current_session_id"] = d.get("session_id") or ts["current_session_id"]
                 ts["final_text"] = d.get("result", "")
                 ts["last_usage"] = d.get("usage") or {}
