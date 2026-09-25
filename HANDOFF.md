@@ -105,6 +105,8 @@ flow. Do not share `.credentials.json` with `~/.claude` by symlink or copy:
 Claude CLI replaces this file during refresh, and independent homes need
 independent logins. Existing session files are copied once when the owner
 tenant is created so `/resume` continues to work after migration.
+Delegated turns use another isolated home and require `/login delegate`
+before their first use. The ordinary `/login` authenticates the chat home.
 
 ## Self-test: adversarial tester + userbot test channel
 

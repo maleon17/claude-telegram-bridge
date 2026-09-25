@@ -844,7 +844,10 @@ def handle_command(chat_id, text, state, offset=None):
         return True
 
     if cmd == "login":
-        start_login(chat_id, state)
+        if arg not in ("", "delegate"):
+            send_message(chat_id, "Использование: /login или /login delegate")
+            return True
+        start_login(chat_id, state, delegated=(arg == "delegate"))
         send_message(chat_id, "Начинаю переподключение аккаунта Claude...")
         return True
 
@@ -1043,6 +1046,12 @@ def start_delegate_turn(
 
     if delegate_process in busy_chats:
         _delegate_error(chat_id, "Уже выполняю предыдущую делегированную задачу.", request_id)
+        return False
+
+    if get_account_status(state, delegate_process) != "ready":
+        _delegate_error(
+            chat_id, "Делегированный аккаунт Claude не подключён. Используй /login delegate.", request_id,
+        )
         return False
 
     if requested_session_id and requested_env:
@@ -1319,13 +1328,30 @@ def _cleanup_login(chat_id, info, terminate=True):
             pass
 
 
-def start_login(chat_id, state):
+def _login_credentials_ready(info):
+    """Require credentials written by this login, not stale `auth status`."""
+    path = os.path.join(info["config_dir"], ".credentials.json")
+    try:
+        if os.path.getmtime(path) < info["started_at"] - 1:
+            return False
+        with open(path, encoding="utf-8") as handle:
+            oauth = (json.load(handle).get("claudeAiOauth") or {})
+        return bool(
+            oauth.get("accessToken") and oauth.get("refreshToken")
+            and int(oauth.get("expiresAt") or 0) > (time.time() + 30) * 1000
+        )
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def start_login(chat_id, state, delegated=False):
     """Start Claude's interactive OAuth flow and relay it through Telegram.
 
-    Every chat, including the owner, logs into its isolated account
-    directory. The FIFO lives there so ``/login`` works remotely.
+    Every chat logs into its isolated account directory. ``/login delegate``
+    authenticates the separate home used by delegated turns.
     """
-    config_dir = account_dir(chat_id)
+    target_key = delegate_key(chat_id) if delegated else chat_id
+    config_dir = account_dir(chat_id, state_key=target_key)
     login_dir = config_dir or os.path.join(os.path.dirname(__file__), "login")
     os.makedirs(login_dir, mode=0o700, exist_ok=True)
     fifo_path = os.path.join(login_dir, f"login_stdin_{chat_id}.fifo")
@@ -1340,12 +1366,7 @@ def start_login(chat_id, state):
     os.mkfifo(fifo_path)
 
     env = dict(os.environ)
-    if config_dir:
-        env["CLAUDE_CONFIG_DIR"] = config_dir
-    else:
-        # The service environment may have been customized.  The owner
-        # login must always target the ordinary ~/.claude account.
-        env.pop("CLAUDE_CONFIG_DIR", None)
+    env["CLAUDE_CONFIG_DIR"] = config_dir
     shell_cmd = f'exec script -qefc "{CLAUDE_BIN} auth login --claudeai" /dev/null 0<>{fifo_path}'
     proc = subprocess.Popen(
         ["bash", "-c", shell_cmd],
@@ -1355,9 +1376,12 @@ def start_login(chat_id, state):
         text=True,
         bufsize=1,
     )
-    info = {"proc": proc, "fifo": fifo_path, "config_dir": config_dir}
+    info = {
+        "proc": proc, "fifo": fifo_path, "config_dir": config_dir,
+        "state_key": target_key, "delegated": delegated, "started_at": time.time(),
+    }
     pending_logins[chat_id] = info
-    set_account_status(state, chat_id, "awaiting_code")
+    set_account_status(state, target_key, "awaiting_code")
 
     def reader():
         deadline = time.time() + LOGIN_TIMEOUT_S
@@ -1389,7 +1413,7 @@ def start_login(chat_id, state):
         except Exception:
             pass
         if not url_seen and pending_logins.get(chat_id) is info:
-            set_account_status(state, chat_id, "login_failed")
+            set_account_status(state, target_key, "login_failed")
             _cleanup_login(chat_id, info)
             send_message(chat_id, "❌ Не удалось запустить вход Claude. Попробуй /login ещё раз.")
 
@@ -1400,12 +1424,13 @@ def feed_login_code(chat_id, code, state):
     info = pending_logins.get(chat_id)
     if not info:
         return False
+    target_key = info["state_key"]
     try:
         with open(info["fifo"], "w") as f:
             f.write(code.strip() + "\n")
     except Exception:
         if pending_logins.get(chat_id) is info:
-            set_account_status(state, chat_id, "login_failed")
+            set_account_status(state, target_key, "login_failed")
             _cleanup_login(chat_id, info)
         send_message(chat_id, "Не смог передать код процессу логина. Попробуй /login заново.")
         return False
@@ -1420,25 +1445,28 @@ def feed_login_code(chat_id, code, state):
                     capture_output=True, text=True, timeout=15,
                 )
                 d = json.loads(r.stdout)
-                if d.get("loggedIn"):
-                    if str(chat_id) == str(OWNER_ID):
-                        set_account_status(state, chat_id, "ready")
+                if d.get("loggedIn") and _login_credentials_ready(info):
+                    if info["delegated"]:
+                        set_account_status(state, target_key, "ready")
+                        success_message = "✅ Делегированный аккаунт Claude подключён."
+                    elif str(chat_id) == str(OWNER_ID):
+                        set_account_status(state, target_key, "ready")
                         success_message = "✅ Аккаунт подключён. Можно пользоваться ботом."
                     else:
-                        set_account_status(state, chat_id, "awaiting_display_name")
+                        set_account_status(state, target_key, "awaiting_display_name")
                         success_message = "✅ Аккаунт подключён.\n\nКак к тебе обращаться?"
                     _cleanup_login(chat_id, info)
                     # A persistent Claude process may have cached the expired
                     # OAuth session.  Recreate it on the next prompt so the
                     # fresh credentials are definitely used.
-                    _stop_chat_process(chat_id)
+                    _stop_chat_process(target_key)
                     send_message(chat_id, success_message)
                     return
             except Exception:
                 pass
             time.sleep(2)
         if pending_logins.get(chat_id) is info:
-            set_account_status(state, chat_id, "login_failed")
+            set_account_status(state, target_key, "login_failed")
             _cleanup_login(chat_id, info)
         send_message(chat_id, "Не удалось подтвердить вход. Проверь код и попробуй /login ещё раз.")
 
@@ -1457,6 +1485,17 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
     # This is called before normal command/prompt routing by bridge.py, so
     # api_id/api_hash replies cannot be persisted as a Claude conversation.
     if _handle_local_bot_api_setup_reply(chat_id, text or ""):
+        return True
+
+    active_login = pending_logins.get(chat_id)
+    if active_login and active_login.get("delegated"):
+        if text and text.strip().lower().lstrip("/.").split()[0:1] == ["login"]:
+            start_login(chat_id, state, delegated=True)
+            send_message(chat_id, "Перезапускаю вход делегированного Claude — сейчас пришлю новую ссылку.")
+        elif text and not text.startswith(("/", ".")):
+            feed_login_code(chat_id, text.strip(), state)
+        else:
+            send_message(chat_id, "Жду код авторизации (пришли его текстом, без команд).")
         return True
 
     status = get_account_status(state, chat_id)

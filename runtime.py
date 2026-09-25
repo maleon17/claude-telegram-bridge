@@ -255,30 +255,6 @@ def default_claude_config_dir():
     )
 
 
-def _ensure_tenant_credentials(path, source):
-    """Seed a new delegated home once; never overwrite its OAuth state."""
-    def refreshable(candidate):
-        try:
-            with open(candidate, encoding="utf-8") as handle:
-                oauth = json.load(handle).get("claudeAiOauth") or {}
-            return bool(oauth.get("refreshToken"))
-        except (OSError, ValueError, AttributeError):
-            return False
-
-    if (os.path.exists(path) and not os.path.islink(path)) or not refreshable(source):
-        return
-    temporary = f"{path}.{uuid.uuid4().hex}.tmp"
-    try:
-        shutil.copyfile(source, temporary)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-
-
 def _ensure_tenant_mcp_config(config_dir):
     config_path = os.path.join(config_dir, ".claude.json")
     if os.path.exists(config_path):
@@ -352,11 +328,9 @@ def account_dir(chat_id, state_key=None):
     if delegated:
         d = os.path.join(DELEGATED_ACCOUNTS_DIR, str(chat_id))
         os.makedirs(d, mode=0o700, exist_ok=True)
-        shared_dir = account_dir(chat_id)
-        # A delegate needs independent credentials because Claude CLI may
-        # atomically replace its credentials file during token refresh.
-        credentials = os.path.join(shared_dir, ".credentials.json")
-        _ensure_tenant_credentials(os.path.join(d, ".credentials.json"), credentials)
+        legacy_link = os.path.join(d, ".credentials.json")
+        if os.path.islink(legacy_link):
+            os.unlink(legacy_link)
         return d
     d = os.path.join(ACCOUNTS_DIR, str(chat_id))
     os.makedirs(d, mode=0o700, exist_ok=True)

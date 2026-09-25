@@ -318,11 +318,9 @@ def pending_deliveries(state):
 def get_account_status(state, chat_id):
     """None (not started) / ``awaiting_code`` / ``ready``.
 
-    The owner normally uses the default ``~/.claude`` account and therefore
-    reads as ready even before this bridge has written any state.  Once the
-    owner explicitly starts ``/login``, however, the persisted temporary
-    status must win so the next Telegram message can be consumed as the
-    OAuth code.
+    The owner defaults to ready for backward compatibility. Once ``/login``
+    starts, its persisted temporary status wins so the next Telegram message
+    can be consumed as the OAuth code. A delegated key has no such default.
     """
     status = state.get(str(chat_id), {}).get("account_status")
     if status:
