@@ -153,7 +153,7 @@ state_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 # Multi-tenant accounts: each chat, including OWNER_ID, gets an isolated
 # CLAUDE_CONFIG_DIR.  The owner's first account creation migrates their live
-# persona/MCP configuration and shares only the OAuth credentials by symlink.
+# persona/MCP configuration and seeds its own OAuth credentials.
 # ---------------------------------------------------------------------------
 
 WHITELIST_FILE = os.path.join(
@@ -255,14 +255,33 @@ def default_claude_config_dir():
     )
 
 
-def _ensure_symlink(link_path, target_path):
-    if os.path.islink(link_path):
-        if os.path.realpath(link_path) == os.path.realpath(target_path):
-            return
-        os.unlink(link_path)
-    elif os.path.exists(link_path):
-        os.unlink(link_path)
-    os.symlink(target_path, link_path)
+def _ensure_tenant_credentials(path, source):
+    """Seed a tenant with refreshable credentials without a fragile symlink.
+
+    Claude CLI replaces its credentials file atomically during token refresh,
+    which turns a symlink into an independent file.  Recover an old broken
+    symlink or a failed-refresh file only when the source has a refresh token.
+    """
+    def refreshable(candidate):
+        try:
+            with open(candidate, encoding="utf-8") as handle:
+                oauth = json.load(handle).get("claudeAiOauth") or {}
+            return bool(oauth.get("refreshToken"))
+        except (OSError, ValueError, AttributeError):
+            return False
+
+    if (not os.path.islink(path) and refreshable(path)) or not refreshable(source):
+        return
+    temporary = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copyfile(source, temporary)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def _ensure_tenant_mcp_config(config_dir):
@@ -339,10 +358,10 @@ def account_dir(chat_id, state_key=None):
         d = os.path.join(DELEGATED_ACCOUNTS_DIR, str(chat_id))
         os.makedirs(d, mode=0o700, exist_ok=True)
         shared_dir = account_dir(chat_id)
-        # OAuth is live state: share it by symlink so token refreshes remain
-        # visible, while sessions/projects/history stay in the delegate dir.
+        # A delegate needs independent credentials because Claude CLI may
+        # atomically replace its credentials file during token refresh.
         credentials = os.path.join(shared_dir, ".credentials.json")
-        _ensure_symlink(os.path.join(d, ".credentials.json"), credentials)
+        _ensure_tenant_credentials(os.path.join(d, ".credentials.json"), credentials)
         return d
     d = os.path.join(ACCOUNTS_DIR, str(chat_id))
     os.makedirs(d, mode=0o700, exist_ok=True)
@@ -367,7 +386,7 @@ def account_dir(chat_id, state_key=None):
         else:
             shutil.copyfile(os.path.join(repo_dir, "HANDOFF.md"), os.path.join(d, "handoff.md"))
     if owner:
-        _ensure_symlink(
+        _ensure_tenant_credentials(
             os.path.join(d, ".credentials.json"),
             os.path.join(default_claude_config_dir(), ".credentials.json"),
         )
