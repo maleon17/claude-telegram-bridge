@@ -9,6 +9,8 @@ import time
 import traceback
 from urllib.parse import urlsplit
 
+from strings import t
+
 from runtime import (
     BATCH_DEBOUNCE_S, CLAUDE_BIN, DRAINING_TEXT, MAX_MSG_LEN, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir,
     batch_timers, busy_chats, claude_env, draining, intake_active, intake_queues, intake_lock, load_whitelist,
@@ -79,13 +81,13 @@ def _model_from_spec(spec):
     parts = compact.split("-")
     family = parts[0]
     if family not in MODEL_ALIASES:
-        raise ValueError(f"Неизвестное семейство «{family}». Доступно: {', '.join(MODEL_ALIASES)}, default")
+        raise ValueError(t('handlers_model_from_spec_1', value0=family, value1=', '.join(MODEL_ALIASES)))
     version = ".".join(parts[1:]) if len(parts) > 1 else None
     candidates = [model for model in MODEL_CATALOG if model["family"] == family]
     if version:
         model = next((model for model in candidates if model["version"] == version), None)
         if model is None:
-            raise ValueError(f"У {family} нет версии {version}.")
+            raise ValueError(t('handlers_model_from_spec_2', value0=family, value1=version))
         return model
     return candidates[-1]
 
@@ -112,20 +114,20 @@ def resolve_effort_spec(model_id, spec):
     if wanted in supported_efforts(model_id):
         return wanted
     model = _model_for_id(model_id)
-    name = model["name"] if model else "модели по умолчанию CLI"
-    raise ValueError(f"Мощность «{spec}» недоступна для {name}.")
+    name = model["name"] if model else t('handlers_resolve_effort_spec_1')
+    raise ValueError(t('handlers_resolve_effort_spec_2', value0=spec, value1=name))
 
 
 def _effort_label(model_id, effort):
     if not supported_efforts(model_id):
-        return "не поддерживается"
+        return t('handlers_effort_label_1')
     if effort is None:
-        return "по умолчанию"
+        return t('handlers_effort_label_2')
     return effort
 
 
 def render_model_picker(current_model, current_effort):
-    lines = ["🧠 Модели Claude:"]
+    lines = [t('handlers_render_model_picker_1')]
     models = sorted(
         MODEL_CATALOG,
         key=lambda model: tuple(int(part) for part in model["version"].split(".")),
@@ -136,22 +138,22 @@ def render_model_picker(current_model, current_effort):
         marker = "●" if model["id"] == current_model else "○"
         lines.append(f"{marker} {model['name']} — `/model {model['id']}`")
     marker = "●" if current_model is None else "○"
-    lines.append(f"{marker} По умолчанию CLI — `/model default`")
-    lines.append(f"⚡ Мощность: {_effort_label(current_model, current_effort)}. Выбрать: /effort")
+    lines.append(t('handlers_render_model_picker_2', value0=marker))
+    lines.append(t('handlers_render_model_picker_3', value0=_effort_label(current_model, current_effort)))
     return "\n".join(lines)
 
 
 def render_effort_picker(model_id, current_effort):
     model = _model_for_id(model_id)
     if model and not model["efforts"]:
-        return f"⚡ {model['name']} не поддерживает настройку мощности."
-    name = model["name"] if model else "по умолчанию CLI"
-    lines = [f"⚡ Мощность модели {name}:"]
+        return t('handlers_render_effort_picker_1', value0=model['name'])
+    name = model["name"] if model else t('handlers_render_effort_picker_2')
+    lines = [t('handlers_render_effort_picker_3', value0=name)]
     for effort in supported_efforts(model_id):
         marker = "●" if effort == current_effort else "○"
         lines.append(f"{marker} {effort} — `/effort {effort}`")
     marker = "●" if current_effort is None else "○"
-    lines.append(f"{marker} По умолчанию CLI — `/effort default`")
+    lines.append(t('handlers_render_effort_picker_4', value0=marker))
     return "\n".join(lines)
 
 
@@ -235,7 +237,7 @@ def _configured_local_bot_api_url():
 def _telegram_bot_api_unit():
     unit = os.environ.get("TELEGRAM_BOT_API_UNIT", "telegram-bot-api").strip()
     if not re.fullmatch(r"[A-Za-z0-9_.@-]+", unit):
-        raise ValueError("Некорректное имя юнита локального Bot API.")
+        raise ValueError(t('handlers_telegram_bot_api_unit_1'))
     return unit
 
 
@@ -278,8 +280,7 @@ def _repair_local_bot_api_service():
         return ""
     if not _systemctl_unit_exists(unit):
         return (
-            "⚠️ Локальный сервер настроен, но его systemd-юнит не установлен. "
-            "Не запускаю установку из бота; прогони scripts/install-local-bot-api.sh вручную."
+            t('handlers_repair_local_bot_api_service_1')
         )
     systemctl_bin = shutil.which("systemctl") or "systemctl"
     try:
@@ -288,27 +289,27 @@ def _repair_local_bot_api_service():
             capture_output=True, text=True, timeout=30, check=False,
         )
     except OSError as exc:
-        return f"⚠️ Не смог перезапустить локальный сервер: {exc}"
+        return t('handlers_repair_local_bot_api_service_2', value0=exc)
     if result.returncode:
         detail = (result.stderr or result.stdout or "").strip()[-300:]
-        return f"⚠️ Не смог перезапустить локальный сервер: {detail or 'команда завершилась с ошибкой'}"
-    return "🔧 Локальный сервер был неактивен; отправил рестарт юнита."
+        return t('handlers_repair_local_bot_api_service_2', value0=detail or t('handlers_repair_local_bot_api_service_3'))
+    return t('handlers_repair_local_bot_api_service_4')
 
 
 def _write_telegram_api_url(url):
     """Atomically replace TELEGRAM_API_URL in bridge.env after a successful switch."""
     if "\n" in url or "\r" in url:
-        raise RuntimeError("Установщик вернул недопустимый адрес локального сервера")
+        raise RuntimeError(t('handlers_write_telegram_api_url_1'))
     parsed = urlsplit(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise RuntimeError("Установщик вернул недопустимый адрес локального сервера")
+        raise RuntimeError(t('handlers_write_telegram_api_url_1'))
     path = _bridge_env_file()
     try:
         with open(path, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
         mode = os.stat(path).st_mode & 0o777
     except FileNotFoundError:
-        raise RuntimeError(f"Не найден env-файл бриджа: {path}")
+        raise RuntimeError(t('handlers_write_telegram_api_url_2', value0=path))
     prefix = "TELEGRAM_API_URL="
     lines = [line for line in lines if not line.startswith(prefix)]
     lines.append(prefix + url)
@@ -347,9 +348,9 @@ def _finish_local_bot_api_setup(chat_id, status, error=None):
     with pending_local_bot_api_setups_lock:
         pending_local_bot_api_setups.pop(chat_id, None)
     if error:
-        _send_local_bot_api_progress(status, f"⚠️ Не удалось включить локальный сервер: {error[-500:]}")
+        _send_local_bot_api_progress(status, t('handlers_finish_local_bot_api_setup_1', value0=error[-500:]))
     else:
-        _send_local_bot_api_progress(status, "✅ Локальный сервер включён. Перезапускаю бота…")
+        _send_local_bot_api_progress(status, t('handlers_finish_local_bot_api_setup_2'))
     request_restart(chat_id)
 
 
@@ -358,13 +359,13 @@ def _run_local_bot_api_install(chat_id, api_id=None, api_hash=None):
     status = {"chat_id": chat_id, "message_id": None}
     output_tail = []
     stage_text = {
-        "dependencies": "⏳ Проверяю зависимости сборки…",
-        "build": "⏳ Собираю локальный Bot API сервер (это может занять несколько минут)…",
-        "install": "⏳ Устанавливаю локальный Bot API сервер…",
-        "done": "⏳ Локальный сервер готов, переключаю бота…",
+        "dependencies": t('handlers_run_local_bot_api_install_1'),
+        "build": t('handlers_run_local_bot_api_install_2'),
+        "install": t('handlers_run_local_bot_api_install_3'),
+        "done": t('handlers_run_local_bot_api_install_4'),
     }
     try:
-        _send_local_bot_api_progress(status, "⏳ Готовлю локальный Bot API сервер…")
+        _send_local_bot_api_progress(status, t('handlers_run_local_bot_api_install_5'))
         env = dict(os.environ)
         if api_id is not None:
             env["TELEGRAM_API_ID"] = api_id
@@ -388,13 +389,13 @@ def _run_local_bot_api_install(chat_id, api_id=None, api_hash=None):
                 if message:
                     _send_local_bot_api_progress(status, message)
             elif line.startswith("REUSE:existing"):
-                _send_local_bot_api_progress(status, "⏳ Использую уже настроенный локальный сервер…")
+                _send_local_bot_api_progress(status, t('handlers_run_local_bot_api_install_6'))
             elif line.startswith("LOCAL_BOT_API_URL="):
                 local_url = line[len("LOCAL_BOT_API_URL="):].strip()
         if process.wait() != 0:
-            raise RuntimeError("\n".join(output_tail) or "установщик завершился с ошибкой")
+            raise RuntimeError("\n".join(output_tail) or t('handlers_run_local_bot_api_install_7'))
         if not local_url:
-            raise RuntimeError("установщик не сообщил адрес локального сервера")
+            raise RuntimeError(t('handlers_run_local_bot_api_install_8'))
         switch_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "switch-to-local-bot-api.sh")
         switch_env = dict(os.environ)
         switch_env["BOT_TOKEN"] = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -404,7 +405,7 @@ def _run_local_bot_api_install(chat_id, api_id=None, api_hash=None):
             env=switch_env, capture_output=True, text=True, timeout=60, check=False,
         )
         if switched.returncode:
-            raise RuntimeError((switched.stderr or switched.stdout or "переключатель завершился с ошибкой")[-500:])
+            raise RuntimeError((switched.stderr or switched.stdout or t('handlers_run_local_bot_api_install_9'))[-500:])
         _write_telegram_api_url(local_url)
     except Exception as exc:
         _finish_local_bot_api_setup(chat_id, status, str(exc))
@@ -422,7 +423,7 @@ def _start_local_bot_api_install(chat_id, api_id=None, api_hash=None):
             status = {"chat_id": chat_id, "message_id": None}
             _finish_local_bot_api_setup(
                 chat_id, status,
-                "не хватает зависимостей сборки; прогони scripts/install-local-bot-api.sh вручную.",
+                t('handlers_start_local_bot_api_install_1'),
             )
             return False
     with pending_local_bot_api_setups_lock:
@@ -447,7 +448,7 @@ def _handle_local_bot_api_setup_reply(chat_id, text):
         return False
     if stage == "installing":
         if text.strip().lower().split("@", 1)[0] == "/update":
-            send_message(chat_id, "Установка локального Bot API уже идёт, дождись её завершения.")
+            send_message(chat_id, t('handlers_handle_local_bot_api_setup_reply_1'))
         return True
     if stage == "awaiting_yes_no":
         if text.strip().lower() in ("да", "yes", "ага"):
@@ -456,26 +457,26 @@ def _handle_local_bot_api_setup_reply(chat_id, text):
             else:
                 with pending_local_bot_api_setups_lock:
                     pending_local_bot_api_setups[chat_id] = {"stage": "awaiting_api_id"}
-                send_message(chat_id, "Пришли api_id.")
+                send_message(chat_id, t('handlers_handle_local_bot_api_setup_reply_2'))
             return True
         with pending_local_bot_api_setups_lock:
             pending_local_bot_api_setups.pop(chat_id, None)
-        send_message(chat_id, "Ладно. Перезапускаю бота, чтобы обновление вступило в силу…")
+        send_message(chat_id, t('handlers_handle_local_bot_api_setup_reply_3'))
         request_restart(chat_id)
         return True
     if stage == "awaiting_api_id":
         api_id = text.strip()
         if not re.fullmatch(r"[0-9]+", api_id):
-            send_message(chat_id, "Пришли api_id (только цифры).")
+            send_message(chat_id, t('handlers_handle_local_bot_api_setup_reply_4'))
             return True
         with pending_local_bot_api_setups_lock:
             pending_local_bot_api_setups[chat_id] = {"stage": "awaiting_api_hash", "api_id": api_id}
-        send_message(chat_id, "Пришли api_hash.")
+        send_message(chat_id, t('handlers_handle_local_bot_api_setup_reply_5'))
         return True
     if stage == "awaiting_api_hash":
         api_hash = text.strip()
         if not api_hash:
-            send_message(chat_id, "Пришли непустой api_hash.")
+            send_message(chat_id, t('handlers_handle_local_bot_api_setup_reply_6'))
             return True
         with pending_local_bot_api_setups_lock:
             api_id = pending_local_bot_api_setups.get(chat_id, {}).get("api_id")
@@ -529,7 +530,7 @@ def send_persona(chat_id):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(contents)
-            result = send_document(chat_id, temporary, caption="Текущая персона")
+            result = send_document(chat_id, temporary, caption=t('handlers_send_persona_1'))
         finally:
             try:
                 os.unlink(temporary)
@@ -557,21 +558,21 @@ def handle_persona_reply(chat_id, message):
             with open(local_path, encoding="utf-8") as handle:
                 contents = handle.read()
         except UnicodeDecodeError:
-            send_message(chat_id, "Файл персоны должен быть текстовым UTF-8 Markdown-файлом.")
+            send_message(chat_id, t('handlers_handle_persona_reply_1'))
             return True
         except Exception as exc:
-            send_message(chat_id, f"Не удалось прочитать файл персоны: {exc}")
+            send_message(chat_id, t('handlers_handle_persona_reply_2', value0=exc))
             return True
     else:
         contents = message.get("text")
         if not isinstance(contents, str):
-            send_message(chat_id, "Пришли текст персоны или UTF-8 Markdown-файл ответом на сообщение.")
+            send_message(chat_id, t('handlers_handle_persona_reply_3'))
             return True
     if not contents.strip():
-        send_message(chat_id, "Пустая персона не сохранена.")
+        send_message(chat_id, t('handlers_handle_persona_reply_4'))
         return True
     _write_persona(_persona_path(chat_id), contents)
-    send_message(chat_id, "✅ Персона обновлена.")
+    send_message(chat_id, t('handlers_handle_persona_reply_5'))
     return True
 
 
@@ -585,14 +586,14 @@ def handle_command(chat_id, text, state, offset=None):
 
     if cmd == "persona":
         if str(chat_id) != str(OWNER_ID):
-            send_message(chat_id, "Персона доступна только владельцу в личном чате.")
+            send_message(chat_id, t('handlers_handle_command_1'))
             return True
         if arg.lower() == "reset":
             with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "personality.example.md"), encoding="utf-8") as handle:
                 _write_persona(_persona_path(chat_id), handle.read())
-            send_message(chat_id, "✅ Персона сброшена к шаблону по умолчанию.")
+            send_message(chat_id, t('handlers_handle_command_2'))
         elif arg:
-            send_message(chat_id, "Использование: /persona или /persona reset")
+            send_message(chat_id, t('handlers_handle_command_3'))
         else:
             send_persona(chat_id)
         return True
@@ -608,7 +609,7 @@ def handle_command(chat_id, text, state, offset=None):
         _stop_chat_process(chat_id)
         clear_pending_prompt(state, chat_id)
         clear_session(state, chat_id)
-        send_message(chat_id, "Начинаю новую сессию.")
+        send_message(chat_id, t('handlers_handle_command_4'))
         return True
 
     if cmd == "compact":
@@ -624,19 +625,19 @@ def handle_command(chat_id, text, state, offset=None):
     if cmd == "sessions":
         sessions = list_sessions(pdir)
         if not sessions:
-            send_message(chat_id, "Сессий не найдено.")
+            send_message(chat_id, t('handlers_handle_command_5'))
             return True
-        lines = ["Последние сессии:"]
+        lines = [t('handlers_handle_command_6')]
         current = get_session(state, chat_id)
         for sid, mtime, preview in sessions:
-            marker = " ← текущая" if sid == current else ""
+            marker = t('handlers_handle_command_7') if sid == current else ""
             lines.append(f"`{sid[:8]}` {mtime} {preview}{marker}")
         send_message(chat_id, "\n".join(lines))
         return True
 
     if cmd == "resume":
         if not arg:
-            send_message(chat_id, "Использование: /resume <session_id или префикс>")
+            send_message(chat_id, t('handlers_handle_command_8'))
             return True
         # arg is untrusted (whitelisted-chat-controlled). Session ids are
         # UUIDs, so accept only a hex/dash prefix and match it against the
@@ -644,7 +645,7 @@ def handle_command(chat_id, text, state, offset=None):
         # user input at all.
         wanted = arg.lower()
         if not SESSION_PREFIX_RE.fullmatch(wanted):
-            send_message(chat_id, f"Сессия {arg} не найдена.")
+            send_message(chat_id, t('handlers_handle_command_9', value0=arg))
             return True
         delegate_process = delegate_key(chat_id)
         delegate_pdir = projects_dir_for(
@@ -667,13 +668,13 @@ def handle_command(chat_id, text, state, offset=None):
         matches = [(chat_id, sid) for sid in matching_sessions(pdir)]
         matches += [(delegate_process, sid) for sid in matching_sessions(delegate_pdir)]
         if not matches:
-            send_message(chat_id, f"Сессия {arg} не найдена.")
+            send_message(chat_id, t('handlers_handle_command_9', value0=arg))
             return True
         if len(matches) > 1:
-            lines = [f"Префикс {arg} подходит к нескольким сессиям, уточни id:"]
+            lines = [t('handlers_handle_command_10', value0=arg)]
             lines.extend(f"`{sid}`" for _, sid in matches[:10])
             if len(matches) > 10:
-                lines.append(f"…и ещё {len(matches) - 10}")
+                lines.append(t('handlers_handle_command_11', value0=len(matches) - 10))
             send_message(chat_id, "\n".join(lines))
             return True
         process_key, sid = matches[0]
@@ -683,7 +684,7 @@ def handle_command(chat_id, text, state, offset=None):
         set_session(state, process_key, sid)
         delegated = process_key == delegate_process
         set_delegate_resume_selected(state, chat_id, delegated)
-        send_message(chat_id, f"Продолжаю {'делегированную ' if delegated else ''}сессию {sid[:8]}.")
+        send_message(chat_id, t('handlers_handle_command_12', value0=t('handlers_handle_command_13') if delegated else '', value1=sid[:8]))
         return True
 
     if cmd == "usage":
@@ -699,7 +700,7 @@ def handle_command(chat_id, text, state, offset=None):
 
         lines = [
             "📊 **Session**",
-            f"`{session_id[:8] if session_id else 'нет активной'}`  •  Model: {model}  •  Мощность: {_effort_label(get_model(state, chat_id), effort)}",
+            t('handlers_handle_command_14', value0=session_id[:8] if session_id else t('handlers_handle_command_15'), value1=model, value2=_effort_label(get_model(state, chat_id), effort)),
             f"Messages: {msg_count if msg_count is not None else '—'}",
             (
                 f"Context: ~{fmt(context_tokens)} tokens"
@@ -711,7 +712,7 @@ def handle_command(chat_id, text, state, offset=None):
             f"{u['calls']} calls",
             f"in {fmt(u['input_tokens'])}  ·  out {fmt(u['output_tokens'])}  ·  "
             f"cache-r {fmt(u['cache_read_tokens'])}  ·  cache-w {fmt(u['cache_creation_tokens'])}",
-            f"(~${u['cost_usd']:.4f} эквивалент по API-тарифу)",
+            t('handlers_handle_command_16', value0=u['cost_usd']),
         ]
 
         by_model = u.get("by_model") or {}
@@ -743,8 +744,7 @@ def handle_command(chat_id, text, state, offset=None):
         except ValueError:
             send_message(
                 chat_id,
-                f"Модель «{arg}» недоступна.\n\n"
-                f"{render_model_picker(get_model(state, chat_id), get_effort(state, chat_id))}",
+                t('handlers_handle_command_17', value0=arg, value1=render_model_picker(get_model(state, chat_id), get_effort(state, chat_id))),
             )
             return True
 
@@ -754,13 +754,13 @@ def handle_command(chat_id, text, state, offset=None):
         if effort_reset:
             set_effort(state, chat_id, None)
         model = _model_for_id(model_id)
-        name = model["name"] if model else "По умолчанию CLI"
+        name = model["name"] if model else t('handlers_handle_command_18')
         lines = [
-            f"🧠 Модель: {name}" + (f" (`{model_id}`)" if model_id else ""),
-            f"Мощность: {_effort_label(model_id, None if effort_reset else previous_effort)}",
+            t('handlers_handle_command_19', value0=name) + (f" (`{model_id}`)" if model_id else ""),
+            t('handlers_handle_command_20', value0=_effort_label(model_id, None if effort_reset else previous_effort)),
         ]
         if effort_reset:
-            lines.append("Выбранная мощность не поддерживается новой моделью и сброшена.")
+            lines.append(t('handlers_handle_command_21'))
         send_message(chat_id, "\n".join(lines))
         return True
 
@@ -774,16 +774,15 @@ def handle_command(chat_id, text, state, offset=None):
         try:
             effort = resolve_effort_spec(model_id, arg)
         except ValueError:
-            name = model["name"] if model else "модели по умолчанию CLI"
+            name = model["name"] if model else t('handlers_resolve_effort_spec_1')
             send_message(
                 chat_id,
-                f"Мощность «{arg}» недоступна для {name}.\n\n"
-                f"{render_effort_picker(model_id, current_effort)}",
+                t('handlers_handle_command_22', value0=arg, value1=name, value2=render_effort_picker(model_id, current_effort)),
             )
             return True
         set_effort(state, chat_id, effort)
-        name = model["name"] if model else "по умолчанию CLI"
-        send_message(chat_id, f"⚡ Мощность {name}: {_effort_label(model_id, effort)}")
+        name = model["name"] if model else t('handlers_render_effort_picker_2')
+        send_message(chat_id, t('handlers_handle_command_23', value0=name, value1=_effort_label(model_id, effort)))
         return True
 
     if cmd == "mode":
@@ -791,36 +790,32 @@ def handle_command(chat_id, text, state, offset=None):
             current = get_permission_mode(state, chat_id) or "bypass"
             send_message(
                 chat_id,
-                f"Текущий режим: `{current}`\nДоступно: {', '.join(PERMISSION_MODES)}\n\n"
-                "bypass — без подтверждений (по умолчанию)\n"
-                "default — каждое опасное действие требует /approve\n"
-                "acceptEdits — правки файлов авто, остальное требует /approve\n"
-                "plan — только чтение, ничего не меняет",
+                t('handlers_handle_command_24', value0=current, value1=', '.join(PERMISSION_MODES)),
             )
             return True
         choice = {mode.lower(): mode for mode in PERMISSION_MODES}.get(arg.lower().strip())
         if choice is None:
-            send_message(chat_id, f"Неизвестный режим. Доступно: {', '.join(PERMISSION_MODES)}")
+            send_message(chat_id, t('handlers_handle_command_25', value0=', '.join(PERMISSION_MODES)))
             return True
         set_permission_mode(state, chat_id, choice)
-        send_message(chat_id, f"Режим переключён на {choice}.")
+        send_message(chat_id, t('handlers_handle_command_26', value0=choice))
         return True
 
     if cmd == "workspace":
         if not arg:
             current = get_workspace(state, chat_id)
-            send_message(chat_id, f"Текущий workspace: `{current}`\nИспользование: /workspace <путь>, /workspace default")
+            send_message(chat_id, t('handlers_handle_command_27', value0=current))
             return True
         if arg.lower() == "default":
             set_workspace(state, chat_id, None)
-            send_message(chat_id, f"Workspace сброшен на {WORKDIR}.")
+            send_message(chat_id, t('handlers_handle_command_28', value0=WORKDIR))
             return True
         path = os.path.abspath(os.path.expanduser(arg))
         if not os.path.isdir(path):
-            send_message(chat_id, f"Директория не существует: `{path}`")
+            send_message(chat_id, t('handlers_handle_command_29', value0=path))
             return True
         set_workspace(state, chat_id, path)
-        send_message(chat_id, f"Workspace переключён на `{path}`.")
+        send_message(chat_id, t('handlers_handle_command_30', value0=path))
         return True
 
     if cmd == "status":
@@ -829,34 +824,34 @@ def handle_command(chat_id, text, state, offset=None):
         effort = _effort_label(get_model(state, chat_id), get_effort(state, chat_id))
         mode = get_permission_mode(state, chat_id) or "bypass"
         workspace = get_workspace(state, chat_id)
-        busy = "да, выполняется запрос (можно /stop)" if chat_id in busy_chats else "нет"
-        acc = get_account_status(state, chat_id) or "не начат"
+        busy = t('handlers_handle_command_31') if chat_id in busy_chats else t('handlers_handle_command_32')
+        acc = get_account_status(state, chat_id) or t('handlers_handle_command_33')
         lines = [
-            "ℹ️ **Статус**",
-            f"Сессия: `{session_id[:8] if session_id else 'нет активной'}`",
-            f"Модель: `{model}` · Мощность: `{effort}`",
-            f"Режим: `{mode}`",
+            t('handlers_handle_command_34'),
+            t('handlers_handle_command_35', value0=session_id[:8] if session_id else t('handlers_handle_command_15')),
+            t('handlers_handle_command_36', value0=model, value1=effort),
+            t('handlers_handle_command_37', value0=mode),
             f"Workspace: `{workspace}`",
-            f"Занят: {busy}",
-            f"Аккаунт Claude: {acc}",
+            t('handlers_handle_command_38', value0=busy),
+            t('handlers_handle_command_39', value0=acc),
         ]
         send_message(chat_id, "\n".join(lines))
         return True
 
     if cmd == "login":
         if arg not in ("", "delegate"):
-            send_message(chat_id, "Использование: /login или /login delegate")
+            send_message(chat_id, t('handlers_handle_command_40'))
             return True
         start_login(chat_id, state, delegated=(arg == "delegate"))
-        send_message(chat_id, "Начинаю переподключение аккаунта Claude...")
+        send_message(chat_id, t('handlers_handle_command_41'))
         return True
 
     if cmd == "restart":
         if str(chat_id) != str(OWNER_ID):
-            send_message(chat_id, "Перезапуск доступен только владельцу.")
+            send_message(chat_id, t('handlers_handle_command_42'))
             return True
         if not SERVICE_NAME:
-            send_message(chat_id, "SERVICE_NAME не задан в systemd-юните — автоперезапуск недоступен.")
+            send_message(chat_id, t('handlers_handle_command_43'))
             return True
         # Don't restart immediately -- if a turn (possibly this very one) is
         # still in flight, killing the process now would cut it off mid-
@@ -868,35 +863,35 @@ def handle_command(chat_id, text, state, offset=None):
         if busy_chats:
             send_message(
                 chat_id,
-                "🔁 Перезапуск запланирован — выполнится, как только текущие запросы завершатся.",
+                t('handlers_handle_command_44'),
             )
         return True
 
     if cmd == "update":
         if str(chat_id) != str(OWNER_ID):
-            send_message(chat_id, "Обновление доступно только владельцу.")
+            send_message(chat_id, t('handlers_handle_command_45'))
             return True
         if not SERVICE_NAME:
-            send_message(chat_id, "SERVICE_NAME не задан в systemd-юните — автоперезапуск недоступен.")
+            send_message(chat_id, t('handlers_handle_command_43'))
             return True
         with pending_local_bot_api_setups_lock:
             if pending_local_bot_api_setups.get(chat_id):
-                send_message(chat_id, "Настройка локального Bot API уже начата; закончи текущий диалог.")
+                send_message(chat_id, t('handlers_handle_command_46'))
                 return True
-        send_message(chat_id, "⬇️ Обновляю из git...")
+        send_message(chat_id, t('handlers_handle_command_47'))
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update.sh")
         try:
             result = subprocess.run(
                 [script], capture_output=True, text=True, timeout=900, check=False,
             )
         except Exception as e:
-            send_message(chat_id, f"❌ Не смог запустить update.sh: {e}")
+            send_message(chat_id, t('handlers_handle_command_48', value0=e))
             return True
         if result.returncode != 0:
             output = (result.stderr or result.stdout or "").strip()[-2000:]
-            send_message(chat_id, f"❌ Обновление не удалось:\n```\n{output}\n```")
+            send_message(chat_id, t('handlers_handle_command_49', value0=output))
             return True
-        summary = (result.stdout or "").strip().splitlines()[-1:] or ["обновлено"]
+        summary = (result.stdout or "").strip().splitlines()[-1:] or [t('handlers_handle_command_50')]
         # Preserve /update's existing promise: anything awaiting its old
         # debounce window must not become a turn while setup/restart follows.
         cancel_pending_batch(chat_id)
@@ -907,14 +902,14 @@ def handle_command(chat_id, text, state, offset=None):
             send_message(chat_id, f"✅ {summary[0]}.")
             send_message(
                 chat_id,
-                "Включить приём файлов до 2 ГБ через локальный Bot API сервер? Да/Нет",
+                t('handlers_handle_command_51'),
             )
             return True
         repair_status = _repair_local_bot_api_service()
         # Same deferred-restart mechanism as /restart: never kill a turn
         # (possibly this very one) mid-answer, only restart once idle.
         request_restart(chat_id)
-        note = " Перезапуск — как только текущие запросы завершатся." if busy_chats else " Перезапуск — между ходами."
+        note = t('handlers_handle_command_52') if busy_chats else t('handlers_handle_command_53')
         suffix = f"\n{repair_status}" if repair_status else ""
         send_message(chat_id, f"✅ {summary[0]}.{suffix}{note}")
         return True
@@ -961,7 +956,7 @@ def _run_turn_thread(
     except Exception:
         err = traceback.format_exc()[-1500:]
         print(err, flush=True)
-        error_text = f"Ошибка моста:\n```\n{err}\n```"
+        error_text = t('bridge_process_message_12', value0=err)
         send_message(output_chat_id or chat_id, error_text)
         if delegated:
             write_last_turn(output_chat_id or chat_id, error_text, delegated=True)
@@ -995,7 +990,7 @@ def spawn_turn(
     if busy:
         send_message(
             output_chat_id or chat_id,
-            "Уже выполняю предыдущий запрос. Дождись ответа или используй /stop.",
+            t('handlers_spawn_turn_1'),
         )
         return False
     _start_turn_thread(
@@ -1045,17 +1040,17 @@ def start_delegate_turn(
         return False
 
     if delegate_process in busy_chats:
-        _delegate_error(chat_id, "Уже выполняю предыдущую делегированную задачу.", request_id)
+        _delegate_error(chat_id, t('handlers_start_delegate_turn_1'), request_id)
         return False
 
     if get_account_status(state, delegate_process) != "ready":
         _delegate_error(
-            chat_id, "Делегированный аккаунт Claude не подключён. Используй /login delegate.", request_id,
+            chat_id, t('handlers_start_delegate_turn_2'), request_id,
         )
         return False
 
     if requested_session_id and requested_env:
-        _delegate_error(chat_id, "Нельзя использовать --env вместе с --resume.", request_id)
+        _delegate_error(chat_id, t('handlers_start_delegate_turn_3'), request_id)
         return False
 
     cancel_pending_batch(delegate_process)
@@ -1088,8 +1083,7 @@ def start_delegate_turn(
         ):
             _delegate_error(
                 chat_id,
-                "Нельзя продолжить эту делегацию: resume_session_id не совпадает "
-                "с последней сессией делегатора.",
+                t('handlers_start_delegate_turn_4'),
                 request_id,
             )
             return False
@@ -1135,7 +1129,7 @@ def start_delegate_turn(
     )
     if not started:
         refused_id = pop_delegate_request_id(state, delegate_process)
-        write_request_result(refused_id, "Делегированная задача не запущена.", ok=False)
+        write_request_result(refused_id, t('handlers_start_delegate_turn_5'), ok=False)
     return started
 
 
@@ -1216,7 +1210,7 @@ def _flush_pending_batch(chat_id, state, generation):
             busy_chats.discard(chat_id)
         err = traceback.format_exc()[-1500:]
         print(err, flush=True)
-        send_message(output_chat_id or chat_id, f"Ошибка моста:\n```\n{err}\n```")
+        send_message(output_chat_id or chat_id, t('bridge_process_message_12', value0=err))
 
 
 def queue_prompt(chat_id, prompt, state, output_chat_id=None):
@@ -1291,16 +1285,14 @@ LOGIN_TIMEOUT_S = 180
 
 def send_whitelist_prompt(chat_id):
     text = (
-        f"Вы не внесены в белый список.\n"
-        f"Ваш Telegram ID: `{chat_id}`\n\n"
-        f"Добавьте его в конфиг через запятую и нажмите на кнопку снизу:"
+        t('handlers_send_whitelist_prompt_1', value0=chat_id)
     )
     tg_call("sendMessage", {
         "chat_id": chat_id,
         "text": format_message(text),
         "parse_mode": "MarkdownV2",
         "reply_markup": {
-            "inline_keyboard": [[{"text": "Готово ✅", "callback_data": "check_whitelist"}]]
+            "inline_keyboard": [[{"text": t('handlers_send_whitelist_prompt_2'), "callback_data": "check_whitelist"}]]
         },
     })
 
@@ -1393,18 +1385,15 @@ def start_login(chat_id, state, delegated=False):
                     url_seen = True
                     send_message(
                         chat_id,
-                        "1. Нажми на кнопку ниже\n"
-                        "2. Войди в свой аккаунт Claude\n"
-                        "3. Пришли мне сюда код, который дадут после входа\n\n"
-                        "Примечание: для входа нужна подписка Pro или выше.",
+                        t('handlers_reader_1'),
                     )
                     # A URL button instead of a raw pasted link -- keeps the
                     # giant OAuth URL out of the chat text entirely.
                     tg_call("sendMessage", {
                         "chat_id": chat_id,
-                        "text": "🔗 Войти в Claude",
+                        "text": t('handlers_reader_2'),
                         "reply_markup": {
-                            "inline_keyboard": [[{"text": "🔗 Войти в Claude", "url": m.group(0)}]]
+                            "inline_keyboard": [[{"text": t('handlers_reader_2'), "url": m.group(0)}]]
                         },
                     })
                     break
@@ -1415,7 +1404,7 @@ def start_login(chat_id, state, delegated=False):
         if not url_seen and pending_logins.get(chat_id) is info:
             set_account_status(state, target_key, "login_failed")
             _cleanup_login(chat_id, info)
-            send_message(chat_id, "❌ Не удалось запустить вход Claude. Попробуй /login ещё раз.")
+            send_message(chat_id, t('handlers_reader_3'))
 
     threading.Thread(target=reader, daemon=True).start()
 
@@ -1432,7 +1421,7 @@ def feed_login_code(chat_id, code, state):
         if pending_logins.get(chat_id) is info:
             set_account_status(state, target_key, "login_failed")
             _cleanup_login(chat_id, info)
-        send_message(chat_id, "Не смог передать код процессу логина. Попробуй /login заново.")
+        send_message(chat_id, t('handlers_feed_login_code_1'))
         return False
 
     def check():
@@ -1448,13 +1437,13 @@ def feed_login_code(chat_id, code, state):
                 if d.get("loggedIn") and _login_credentials_ready(info):
                     if info["delegated"]:
                         set_account_status(state, target_key, "ready")
-                        success_message = "✅ Делегированный аккаунт Claude подключён."
+                        success_message = t('handlers_check_1')
                     elif str(chat_id) == str(OWNER_ID):
                         set_account_status(state, target_key, "ready")
-                        success_message = "✅ Аккаунт подключён. Можно пользоваться ботом."
+                        success_message = t('handlers_check_2')
                     else:
                         set_account_status(state, target_key, "awaiting_display_name")
-                        success_message = "✅ Аккаунт подключён.\n\nКак к тебе обращаться?"
+                        success_message = t('handlers_check_3')
                     _cleanup_login(chat_id, info)
                     # A persistent Claude process may have cached the expired
                     # OAuth session.  Recreate it on the next prompt so the
@@ -1468,7 +1457,7 @@ def feed_login_code(chat_id, code, state):
         if pending_logins.get(chat_id) is info:
             set_account_status(state, target_key, "login_failed")
             _cleanup_login(chat_id, info)
-        send_message(chat_id, "Не удалось подтвердить вход. Проверь код и попробуй /login ещё раз.")
+        send_message(chat_id, t('handlers_check_4'))
 
     threading.Thread(target=check, daemon=True).start()
     return True
@@ -1491,11 +1480,11 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
     if active_login and active_login.get("delegated"):
         if text and text.strip().lower().lstrip("/.").split()[0:1] == ["login"]:
             start_login(chat_id, state, delegated=True)
-            send_message(chat_id, "Перезапускаю вход делегированного Claude — сейчас пришлю новую ссылку.")
+            send_message(chat_id, t('handlers_handle_onboarding_1'))
         elif text and not text.startswith(("/", ".")):
             feed_login_code(chat_id, text.strip(), state)
         else:
-            send_message(chat_id, "Жду код авторизации (пришли его текстом, без команд).")
+            send_message(chat_id, t('handlers_handle_onboarding_2'))
         return True
 
     status = get_account_status(state, chat_id)
@@ -1505,12 +1494,12 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
     if status == "awaiting_code":
         if text and text.strip().lower().lstrip("/.").split()[0:1] == ["login"]:
             start_login(chat_id, state)
-            send_message(chat_id, "Перезапускаю вход Claude — сейчас пришлю новую ссылку.")
+            send_message(chat_id, t('handlers_handle_onboarding_3'))
             return True
         if text and not text.startswith(("/", ".")):
             feed_login_code(chat_id, text.strip(), state)
         else:
-            send_message(chat_id, "Жду код авторизации (пришли его текстом, без команд).")
+            send_message(chat_id, t('handlers_handle_onboarding_2'))
         return True
 
     elif status == "awaiting_display_name":
@@ -1523,11 +1512,11 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
                 with open(claude_md, "w", encoding="utf-8") as f:
                     f.write(personality.replace("<user>", (text or "").strip()))
         set_account_status(state, chat_id, "ready")
-        send_message(chat_id, "✅ Готово. Можно пользоваться ботом.")
+        send_message(chat_id, t('handlers_handle_onboarding_4'))
         return True
 
     start_login(chat_id, state)
-    send_message(chat_id, "Ты в списке — начинаю подключение твоего аккаунта Claude...")
+    send_message(chat_id, t('handlers_handle_onboarding_5'))
     return True
 
 
@@ -1541,13 +1530,13 @@ def handle_callback_query(cq, state):
 
     whitelist = load_whitelist()
     if str(from_id) not in whitelist:
-        answer_callback_query(cq["id"], "Ещё не добавлен в список.", show_alert=True)
+        answer_callback_query(cq["id"], t('handlers_handle_callback_query_1'), show_alert=True)
         return
 
-    answer_callback_query(cq["id"], "Принято!")
+    answer_callback_query(cq["id"], t('handlers_handle_callback_query_2'))
     status = get_account_status(state, chat_id)
     if status == "ready":
-        send_message(chat_id, "Аккаунт уже подключён.")
+        send_message(chat_id, t('handlers_handle_callback_query_3'))
     elif status != "awaiting_code":
         start_login(chat_id, state)
-        send_message(chat_id, "Ты в списке — начинаю подключение твоего аккаунта Claude...")
+        send_message(chat_id, t('handlers_handle_onboarding_5'))

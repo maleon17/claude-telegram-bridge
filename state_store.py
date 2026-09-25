@@ -4,6 +4,8 @@ import os
 import subprocess
 import time
 
+from strings import t
+
 from runtime import (
     CLAUDE_BIN, COST_WARNING_USD, OWNER_ID, PROJECTS_DIR, RESTART_SIGNAL_FILE,
     STATE_FILE, WORKDIR, claude_env, state_lock,
@@ -12,6 +14,13 @@ from telegram_api import send_message
 
 
 DELEGATE_KEY_PREFIX = "delegate:"
+
+
+def _chat_state(state, chat_id):
+    """Return a mutable per-chat entry with the phase-1 language default."""
+    entry = state.setdefault(str(chat_id), {})
+    entry.setdefault("language", "ru")
+    return entry
 
 
 def delegate_key(chat_id):
@@ -42,7 +51,7 @@ def get_session(state, chat_id):
 
 def set_session(state, chat_id, session_id):
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         entry["session_id"] = session_id
         entry["updated_at"] = time.time()
         save_state(state)
@@ -54,7 +63,7 @@ def get_pending_delegator(state, chat_id):
 
 def set_pending_delegator(state, chat_id, session_id):
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         entry["pending_delegator_session_id"] = session_id
         save_state(state)
 
@@ -65,7 +74,7 @@ def get_delegate_resume_selected(state, chat_id):
 
 def set_delegate_resume_selected(state, chat_id, selected):
     with state_lock:
-        entry = state.setdefault(str(delegate_key(chat_id)), {})
+        entry = _chat_state(state, delegate_key(chat_id))
         entry["resume_selected"] = bool(selected)
         save_state(state)
 
@@ -97,7 +106,7 @@ def add_usage(state, chat_id, session_id, result_event, notify_chat_id=None):
         return
     prev_cost = new_cost = baseline = None
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         sessions = entry.setdefault("sessions", {})
         usage = sessions.setdefault(session_id, _empty_usage())
         usage.setdefault("by_model", {})
@@ -157,9 +166,7 @@ def add_usage(state, chat_id, session_id, result_event, notify_chat_id=None):
     if new_cost is not None and prev_cost - baseline < COST_WARNING_USD <= new_cost - baseline:
         send_message(
             chat_id if notify_chat_id is None else notify_chat_id,
-            f"⚠️ Стоимость этой сессии по API-эквиваленту выросла ещё на "
-            f"${COST_WARNING_USD:.0f} (всего ~${new_cost:.2f}). "
-            f"Есть смысл сделать /compact или начать заново через /new.",
+            t('state_store_add_usage_1', value0=COST_WARNING_USD, value1=new_cost),
         )
 
 
@@ -172,7 +179,7 @@ def reset_cost_warning_baseline(state, chat_id, session_id):
     if not session_id:
         return
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         sessions = entry.setdefault("sessions", {})
         usage = sessions.setdefault(session_id, _empty_usage())
         usage["cost_baseline_usd"] = usage.get("cost_usd", 0.0)
@@ -191,7 +198,7 @@ def get_model(state, chat_id):
 
 def set_model(state, chat_id, model):
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         if model:
             entry["model"] = model
         else:
@@ -207,7 +214,7 @@ def get_effort(state, chat_id):
 def set_effort(state, chat_id, effort):
     """Persist an effort override; None leaves the CLI default in effect."""
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         if effort:
             entry["effort"] = effort
         else:
@@ -222,7 +229,7 @@ def get_permission_mode(state, chat_id):
 
 def set_permission_mode(state, chat_id, mode):
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         if mode and mode != "bypass":
             entry["permission_mode"] = mode
         else:
@@ -236,7 +243,7 @@ def get_workspace(state, chat_id):
 
 def set_workspace(state, chat_id, path):
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         if path:
             entry["workspace"] = path
         else:
@@ -247,7 +254,7 @@ def set_workspace(state, chat_id, path):
 def set_pending_prompt(state, chat_id, prompt, session_id=None):
     """Remember a denied prompt for /approve, bound to the session it ran in."""
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         entry["pending_prompt"] = prompt
         entry["pending_prompt_session_id"] = session_id
         save_state(state)
@@ -278,7 +285,7 @@ def clear_pending_prompt(state, chat_id):
 
 def set_delegate_request_id(state, chat_id, request_id):
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         if request_id:
             entry["delegate_request_id"] = request_id
         else:
@@ -297,7 +304,7 @@ def pop_delegate_request_id(state, chat_id):
 
 def set_pending_delivery(state, chat_id, delivery):
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         if delivery:
             entry["pending_delivery"] = delivery
         else:
@@ -332,7 +339,7 @@ def get_account_status(state, chat_id):
 
 def set_account_status(state, chat_id, status):
     with state_lock:
-        entry = state.setdefault(str(chat_id), {})
+        entry = _chat_state(state, chat_id)
         if status:
             entry["account_status"] = status
         else:
@@ -429,8 +436,8 @@ def fetch_account_limits(config_dir=None):
                 ]
                 return "\n".join(headline) if headline else text
     except Exception as e:
-        return f"(не удалось получить лимиты: {e})"
-    return "(нет данных)"
+        return t('state_store_fetch_account_limits_1', value0=e)
+    return t('state_store_fetch_account_limits_2')
 
 
 def projects_dir_for(config_dir, workspace):

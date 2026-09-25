@@ -24,6 +24,8 @@ import time
 import traceback
 from collections import deque
 
+from strings import t
+
 from runtime import (
     DRAINING_TEXT, EXTERNAL_REQUEST_DIR, EXTERNAL_REQUEST_FILE, FILE_SEND_MAX_CAPTION_CHARS,
     FILE_SEND_QUEUE_DIR,
@@ -111,31 +113,31 @@ def _file_send_watcher_loop():
 
             ok = False
             if not isinstance(request, dict):
-                result_text = "Отклонено: повреждённый запрос отправки файла."
+                result_text = t('bridge_file_send_watcher_loop_1')
             else:
                 chat_id = request.get("chat_id")
                 path = request.get("path")
                 caption = request.get("caption", "")
                 if not isinstance(chat_id, int) or isinstance(chat_id, bool):
-                    result_text = "Отклонено: некорректный Telegram chat_id."
+                    result_text = t('bridge_file_send_watcher_loop_2')
                 elif str(chat_id) not in load_whitelist():
-                    result_text = "Отклонено: Telegram ID отсутствует в whitelist Claude bridge."
+                    result_text = t('bridge_file_send_watcher_loop_3')
                 elif not isinstance(path, str) or not isinstance(caption, str):
-                    result_text = "Отклонено: некорректный путь или подпись."
+                    result_text = t('bridge_file_send_watcher_loop_4')
                 elif len(caption) > FILE_SEND_MAX_CAPTION_CHARS:
-                    result_text = "Отклонено: подпись длиннее лимита Telegram."
+                    result_text = t('bridge_file_send_watcher_loop_5')
                 else:
                     source = _file_in_tenant_outbox(chat_id, path)
                     if source is None:
-                        result_text = "Отклонено: файл должен быть обычным файлом из CLAUDE_TELEGRAM_OUTBOX."
+                        result_text = t('bridge_file_send_watcher_loop_6')
                     elif os.path.getsize(source) > MAX_DOCUMENT_BYTES:
-                        result_text = f"Отклонено: файл больше {MAX_DOCUMENT_BYTES} байт."
+                        result_text = t('bridge_file_send_watcher_loop_7', value0=MAX_DOCUMENT_BYTES)
                     else:
                         result = send_document(chat_id, source, caption)
                         ok = bool(result.get("ok"))
                         result_text = (
-                            f"Файл «{os.path.basename(source)}» отправлен в Telegram."
-                            if ok else "Telegram не принял файл: " + str(
+                            t('bridge_file_send_watcher_loop_8', value0=os.path.basename(source))
+                            if ok else t('bridge_file_send_watcher_loop_9') + str(
                                 result.get("description") or result.get("error") or result
                             )[:500]
                         )
@@ -307,10 +309,10 @@ def _restart_watcher_loop(state):
         r_chat_id = restart_req["chat_id"]
         if not SERVICE_NAME:
             draining.clear()
-            send_message(r_chat_id, "❌ SERVICE_NAME не задан — перезапуск невозможен.")
+            send_message(r_chat_id, t('bridge_restart_watcher_loop_1'))
             continue
         rr = send_message(
-            r_chat_id, "🔄 Идёт перезагрузка, ничего не делайте пока процесс не будет завершён...",
+            r_chat_id, t('bridge_restart_watcher_loop_2'),
         )
         r_message_id = (rr.get("result") or {}).get("message_id") if rr.get("ok") else None
         if r_message_id:
@@ -331,12 +333,12 @@ def _restart_watcher_loop(state):
                 ["sudo", "-n", "systemctl", "restart", SERVICE_NAME],
                 capture_output=True, text=True, timeout=90,
             )
-            error = (result.stderr or result.stdout or "").strip() or f"код {result.returncode}"
+            error = (result.stderr or result.stdout or "").strip() or t('bridge_restart_watcher_loop_3', value0=result.returncode)
         except Exception as exc:
             error = str(exc)
         # Still alive: systemd did not restart us. Resume accepting work.
         draining.clear()
-        send_message(r_chat_id, f"❌ Перезапуск не выполнен: {error[:500]}")
+        send_message(r_chat_id, t('bridge_restart_watcher_loop_4', value0=error[:500]))
 
 
 def _external_request_watcher_loop(state):
@@ -377,12 +379,12 @@ def _external_request_watcher_loop(state):
                 if path != EXTERNAL_REQUEST_FILE else None
             )
             if not isinstance(request, dict):
-                write_request_result(request_id, "Повреждённый запрос делегации.", ok=False)
+                write_request_result(request_id, t('bridge_external_request_watcher_loop_1'), ok=False)
                 continue
             chat_id = request.get("chat_id") or OWNER_ID
             text = request.get("text")
             if not text:
-                write_request_result(request_id, "Пустой текст задачи.", ok=False)
+                write_request_result(request_id, t('bridge_external_request_watcher_loop_2'), ok=False)
                 continue
             start_delegate_turn(
                 chat_id,
@@ -449,33 +451,31 @@ def _cross_delegate_watcher_loop(state):
 
             ok = False
             if not isinstance(request, dict):
-                result_text = "Отклонено: повреждённый формат запроса делегации."
+                result_text = t('bridge_cross_delegate_watcher_loop_1')
             else:
                 chat_id = request.get("chat_id")
                 text = request.get("text")
                 if not isinstance(chat_id, int) or isinstance(chat_id, bool):
-                    result_text = "Отклонено: некорректный Telegram chat_id."
+                    result_text = t('bridge_file_send_watcher_loop_2')
                 elif not isinstance(text, str) or not text.strip():
-                    result_text = "Отклонено: пустой текст задачи."
+                    result_text = t('bridge_cross_delegate_watcher_loop_2')
                 elif str(chat_id) not in load_whitelist():
                     result_text = (
-                        "Отклонено: этот Telegram ID отсутствует в whitelist Claude bridge."
+                        t('bridge_cross_delegate_watcher_loop_3')
                     )
                 elif get_account_status(state, chat_id) != "ready":
                     result_text = (
-                        "Отклонено: Claude-аккаунт для этого Telegram ID не готов. "
-                        "Сначала заверши /login в Claude bridge."
+                        t('bridge_cross_delegate_watcher_loop_4')
                     )
                 else:
                     ok = start_delegate_turn(chat_id, text, state)
                     if ok:
                         result_text = (
-                            "Принято: Claude bridge запустил задачу. Результат придёт "
-                            "в этот же Telegram-чат от Claude bridge."
+                            t('bridge_cross_delegate_watcher_loop_5')
                         )
                     else:
                         result_text = (
-                            "Отклонено: уже выполняется предыдущая делегированная задача."
+                            t('bridge_cross_delegate_watcher_loop_6')
                         )
             try:
                 _write_cross_delegate_result(request_id, ok, result_text)
@@ -624,29 +624,28 @@ def _process_message(msg, state):
             cancel_pending_batch(target_key)
             if target_key in busy_chats:
                 _stop_chat_process(target_key)
-                send_message(chat_id, "⏹ Прерываю текущий запрос...")
+                send_message(chat_id, t('bridge_process_message_1'))
             else:
-                send_message(chat_id, "Сейчас ничего не выполняется.")
+                send_message(chat_id, t('bridge_process_message_2'))
             return
 
         if cmd == "approve" and text.startswith(("/", ".")) and not forwarded:
             target_key = process_key_for_command(chat_id, state)
             pending = get_pending_prompt(state, target_key)
             if not pending:
-                send_message(chat_id, "Нет заблокированного действия для approve.")
+                send_message(chat_id, t('bridge_process_message_3'))
                 return
             if not pending_prompt_is_current(state, target_key):
                 clear_pending_prompt(state, target_key)
                 send_message(
                     chat_id,
-                    "Заблокированное действие относится к прошлой сессии — "
-                    "повторять его в текущей не буду.",
+                    t('bridge_process_message_4'),
                 )
                 return
             arg = text.partition(" ")[2].strip().lower()
             if arg == "session":
                 set_permission_mode(state, target_key, "bypass")
-                send_message(chat_id, "Bypass включён для этой сессии насовсем. Повторяю...")
+                send_message(chat_id, t('bridge_process_message_5'))
                 clear_pending_prompt(state, target_key)
                 spawn_turn(
                     target_key,
@@ -656,7 +655,7 @@ def _process_message(msg, state):
                     delegated=target_key != chat_id,
                 )
             else:
-                send_message(chat_id, "Разрешаю один раз. Повторяю...")
+                send_message(chat_id, t('bridge_process_message_6'))
                 clear_pending_prompt(state, target_key)
                 spawn_turn(
                     target_key,
@@ -672,9 +671,9 @@ def _process_message(msg, state):
             target_key = process_key_for_command(chat_id, state)
             if get_pending_prompt(state, target_key):
                 clear_pending_prompt(state, target_key)
-                send_message(chat_id, "Отклонено.")
+                send_message(chat_id, t('bridge_process_message_7'))
             else:
-                send_message(chat_id, "Нечего отклонять.")
+                send_message(chat_id, t('bridge_process_message_8'))
             return
 
         if (
@@ -689,15 +688,14 @@ def _process_message(msg, state):
         if voice and not voice_transcription_available():
             send_message(
                 chat_id,
-                "Голосовые сообщения не распознаются: на этой установке нет "
-                "faster-whisper (см. setup.sh). Напиши текстом.",
+                t('bridge_process_message_9'),
             )
             voice = None
             if not (text.strip() or caption.strip() or photo or document):
                 return
         download_progress_msg_id = None
         if LOCAL_BOT_API and (photo or document or voice):
-            status = send_message(chat_id, "📥 Загружаю вложение…")
+            status = send_message(chat_id, t('bridge_process_message_10'))
             if status.get("ok"):
                 download_progress_msg_id = (status.get("result") or {}).get("message_id")
         if photo:
@@ -732,7 +730,7 @@ def _process_message(msg, state):
                 except Exception:
                     print(traceback.format_exc()[-1500:], flush=True)
                 if not voice_text:
-                    send_message(chat_id, "Не удалось распознать голосовое сообщение.")
+                    send_message(chat_id, t('bridge_process_message_11'))
             except AttachmentDownloadError as exc:
                 send_message(chat_id, str(exc))
                 detail = str(exc).removeprefix("Файл не скачан: ")
@@ -752,7 +750,7 @@ def _process_message(msg, state):
     except Exception:
         err = traceback.format_exc()[-1500:]
         print(err, flush=True)
-        send_message(chat_id, f"Ошибка моста:\n```\n{err}\n```")
+        send_message(chat_id, t('bridge_process_message_12', value0=err))
 
 
 def _is_urgent_stop(msg, state):
@@ -782,9 +780,9 @@ def _handle_urgent_stop(chat_id):
     cancel_pending_batch(target_key)
     if target_key in busy_chats:
         _stop_chat_process(target_key)
-        send_message(chat_id, "⏹ Прерываю текущий запрос...")
+        send_message(chat_id, t('bridge_process_message_1'))
     else:
-        send_message(chat_id, "Сейчас ничего не выполняется.")
+        send_message(chat_id, t('bridge_process_message_2'))
 
 
 def _enqueue_intake(msg, state):
@@ -811,7 +809,7 @@ def _intake_worker(chat_id, state):
         except Exception:
             err = traceback.format_exc()[-1500:]
             print(err, flush=True)
-            send_message(chat_id, f"Ошибка моста:\n```\n{err}\n```")
+            send_message(chat_id, t('bridge_process_message_12', value0=err))
 
 
 def main():
@@ -828,7 +826,7 @@ def main():
     if pending_restart:
         edit_message(
             pending_restart["chat_id"], pending_restart["message_id"],
-            "✅ Перезагрузка окончена, бот готов к работе.",
+            t('bridge_main_1'),
         )
 
     # Clean up any chat's persistent process on a real shutdown signal --

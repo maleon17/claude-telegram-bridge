@@ -16,6 +16,7 @@ import glob
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strings import t
 from telegram_format import format_message, strip_mdv2, escape_mdv2
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -128,7 +129,7 @@ busy_chats = set()
 # "start draining" atomic relative to accepting a message or starting a turn.
 draining = threading.Event()
 intake_lock = threading.RLock()
-DRAINING_TEXT = "🔄 Бот перезапускается — повтори сообщение через минуту."
+DRAINING_TEXT = t('runtime_module_1')
 # Per-chat serial processing of incoming messages (downloads, transcription,
 # commands) off the getUpdates thread: chat_id -> deque of messages, plus the
 # set of chats whose intake worker is currently running.

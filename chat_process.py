@@ -7,6 +7,8 @@ import threading
 import time
 import traceback
 
+from strings import t
+
 from runtime import (
     CHAT_PROC_IDLE_TIMEOUT_S, CLAUDE_BIN, EDIT_THROTTLE_S, EXTERNAL_RESULT_DIR, STATE_FILE,
     STATE_INSTANCE_NAME, THINKING_SPINNER_FRAMES, WORKDIR, busy_chats, chat_procs,
@@ -93,7 +95,7 @@ def _finish_delivery(state, state_key, delivery, ok):
     set_pending_delivery(state, state_key, None)
     text = delivery.get("text") or ""
     if not ok:
-        text = "⚠️ Ответ не удалось доставить в Telegram:\n\n" + text
+        text = t('chat_process_finish_delivery_1') + text
     if delivery.get("signal_last_turn"):
         write_last_turn(
             delivery.get("chat_id"), text, delegated=bool(delivery.get("delegated")), ok=ok,
@@ -132,7 +134,7 @@ def deliver_pending_final(state, state_key, delivery):
                     # Don't keep a waiting bridge_exec.py caller blocked on
                     # Telegram retries: it gets the text now, flagged as not
                     # yet delivered; a later successful retry re-signals ok.
-                    pending_text = "⚠️ Telegram пока не принял ответ, доставка повторяется:\n\n" + text
+                    pending_text = t('chat_process_deliver_pending_final_1') + text
                     if delivery.get("signal_last_turn"):
                         write_last_turn(
                             chat_id, pending_text,
@@ -217,17 +219,16 @@ def _format_turn_footer(state, chat_id, ts, preserve_current_session=False):
             if key in usage:
                 token_parts.append(f"{label}: {usage[key]}")
         if token_parts:
-            parts.append(f"Токены: {', '.join(token_parts)}")
+            parts.append(t('chat_process_format_turn_footer_1', value0=', '.join(token_parts)))
     session_id = ts.get("current_session_id")
     prior_session_id = get_pending_delegator(state, chat_id)
     if prior_session_id is not None and session_id:
         if prior_session_id:
             parts.append(
-                f"Твой session id (до делегации): `{prior_session_id[:8]}`. "
-                f"Продолжить делегированную: `/resume {session_id[:8]}`"
+                t('chat_process_format_turn_footer_2', value0=prior_session_id[:8], value1=session_id[:8])
             )
         else:
-            parts.append(f"Продолжить делегированную сессию: `/resume {session_id[:8]}`")
+            parts.append(t('chat_process_format_turn_footer_3', value0=session_id[:8]))
         set_pending_delegator(state, chat_id, None)
         # For ordinary owner turns, restore the owner's own pre-delegation
         # session right away (the existing fix mirrored in
@@ -298,7 +299,7 @@ def _flush_draft(chat_id, ts, force=False):
         for label, content in ts["draft_res_blocks"]:
             lines.append(escape_mdv2(f"{label}:"))
             lines.append(mdv2_fenced_code(content))
-    body = "\n".join(lines) if lines else "Думаю"
+    body = "\n".join(lines) if lines else t('chat_process_flush_draft_1')
     text = f"🤔 {body}"
 
     with ts["progress_lock"]:
@@ -347,7 +348,7 @@ def _compact_draft_watchdog(chat_id, ts):
     done = ts["compact_done_event"]
     while not done.wait(timeout=15):
         elapsed = int(time.time() - start)
-        ts["draft_thought"] = f"🗜 Сжимаю контекст сессии... ({elapsed}с, это может занять несколько минут)"
+        ts["draft_thought"] = t('chat_process_compact_draft_watchdog_1', value0=elapsed)
         _flush_draft(chat_id, ts, force=True)
         if elapsed > 1200:
             return
@@ -396,12 +397,11 @@ def _deliver_turn_result(
             used += cost
         visible.reverse()
         hidden = len(log_lines) - len(visible)
-        body_lines = [f"…и ещё {hidden} шагов выше…"] if hidden > 0 else []
+        body_lines = [t('chat_process_deliver_turn_result_1', value0=hidden)] if hidden > 0 else []
         body_lines.extend(visible)
         body = "\n".join(body_lines)
         process_rich_text = (
-            f"<details><summary>🔧 Процесс ({len(log_lines)})</summary>\n"
-            f"{body}\n</details>"
+            t('chat_process_deliver_turn_result_2', value0=len(log_lines), value1=body)
         )
 
     with chat_procs_lock:
@@ -421,11 +421,11 @@ def _deliver_turn_result(
         # long-running /compact on a large session can end this way with
         # no exception or stderr output anywhere). "по /stop" would lie in
         # every case except the first, so keep the wording cause-agnostic.
-        text_out = "⏹ Ход прерван — процесс завершился, не дождавшись ответа."
+        text_out = t('chat_process_deliver_turn_result_3')
     elif ts.get("compact_outcome"):
         text_out = ts["compact_outcome"]
     else:
-        text_out = final_text if final_text is not None else "(нет ответа — смотри процесс выше)"
+        text_out = final_text if final_text is not None else t('chat_process_deliver_turn_result_4')
 
     progress_became_process_block = False
     if process_rich_text:
@@ -440,7 +440,7 @@ def _deliver_turn_result(
         else:
             send_rich(telegram_chat_id, process_rich_text)
 
-    final_payload = text_out or "(пусто)"
+    final_payload = text_out or t('chat_process_deliver_turn_result_5')
     if not stopped:
         footer = _format_turn_footer(
             state, chat_id, ts, preserve_current_session=delegated,
@@ -499,13 +499,13 @@ def _deliver_turn_result(
         return
     if ts["denials"] and prompt:
         set_pending_prompt(state, chat_id, prompt, session_id=get_session(state, chat_id))
-        lines = ["🚫 **Заблокировано** (нужно разрешение):"]
+        lines = [t('chat_process_deliver_turn_result_6')]
         for d in ts["denials"][:10]:
             lines.append(f"`{d.get('tool_name', '?')}`  {json.dumps(d.get('tool_input', {}), ensure_ascii=False)[:150]}")
         lines.append("")
-        lines.append("/approve — повторить один раз с bypass")
-        lines.append("/approve session — включить bypass насовсем для этой сессии")
-        lines.append("/deny — оставить как есть")
+        lines.append(t('chat_process_deliver_turn_result_7'))
+        lines.append(t('chat_process_deliver_turn_result_8'))
+        lines.append(t('chat_process_deliver_turn_result_9'))
         send_message(telegram_chat_id, "\n".join(lines))
     else:
         clear_pending_prompt(state, chat_id)
@@ -603,7 +603,7 @@ def _chat_reader_loop(chat_id, state, record):
                 # "result" event for that turn carries an empty final_text
                 # -- surface something useful instead of "(пусто)".
                 if d.get("status") == "compacting":
-                    ts["draft_thought"] = "🗜 Сжимаю контекст сессии..."
+                    ts["draft_thought"] = t('chat_process_chat_reader_loop_1')
                     ts["draft_cmd_label"] = None
                     ts["draft_cmd"] = None
                     ts["draft_res_blocks"] = []
@@ -627,10 +627,10 @@ def _chat_reader_loop(chat_id, state, record):
                     if ts["compact_done_event"]:
                         ts["compact_done_event"].set()
                     if d.get("compact_result") == "failed":
-                        err = d.get("compact_error") or "неизвестная ошибка"
-                        ts["compact_outcome"] = f"🗜 Не удалось сжать контекст: {err}"
+                        err = d.get("compact_error") or t('chat_process_chat_reader_loop_2')
+                        ts["compact_outcome"] = t('chat_process_chat_reader_loop_3', value0=err)
                     else:
-                        ts["compact_outcome"] = "🗜 Контекст сессии сжат."
+                        ts["compact_outcome"] = t('chat_process_chat_reader_loop_4')
                         reset_cost_warning_baseline(state, chat_id, ts["current_session_id"])
                 continue
 
@@ -705,7 +705,7 @@ def _chat_reader_loop(chat_id, state, record):
                                 res_blocks.append(("❌ StdErr", _draft_clean(preview)))
                             if not log_parts:
                                 icon = "❌" if is_error else "✅"
-                                log_parts.append(f"{icon} (пусто)")
+                                log_parts.append(t('chat_process_chat_reader_loop_5', value0=icon))
                             ts["log_lines"].append("\n".join(log_parts))
                             ts["draft_res_blocks"] = res_blocks
                         else:
@@ -732,7 +732,7 @@ def _chat_reader_loop(chat_id, state, record):
                                 res_blocks.append(("❌ StdErr", f"Exit code {exit_code}"))
                             else:
                                 icon = "❌" if is_error else "✅"
-                                label = f"{icon} {'Ошибка' if is_error else 'Результат'}"
+                                label = f"{icon} {t('chat_process_chat_reader_loop_6') if is_error else t('chat_process_chat_reader_loop_7')}"
                                 preview = result_content.strip()[:400]
                                 log_parts.append(f"{label}:\n{fenced_code(preview)}")
                                 res_blocks.append((label, _draft_clean(preview)))

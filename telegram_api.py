@@ -10,6 +10,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from strings import t
+
 from runtime import (
     API_BASE, FILE_API_BASE, FILE_PATH_RE, GET_FILE_TIMEOUT_S, IMAGE_EXTS,
     LOCAL_BOT_API, MAX_DOCUMENT_BYTES, MAX_MSG_LEN, MAX_PHOTO_BYTES,
@@ -200,10 +202,10 @@ def send_attachment(chat_id, path, caption=None):
     elif size <= MAX_DOCUMENT_BYTES:
         r = send_document(chat_id, path, caption)
     else:
-        send_message(chat_id, f"Файл `{path}` слишком большой для отправки ({size} байт).")
+        send_message(chat_id, t('telegram_api_send_attachment_1', value0=path, value1=size))
         return
     if not r.get("ok"):
-        send_message(chat_id, f"Не удалось отправить `{path}`: {r.get('description', r)}")
+        send_message(chat_id, t('telegram_api_send_attachment_2', value0=path, value1=r.get('description', r)))
 
 
 class AttachmentDownloadError(RuntimeError):
@@ -217,18 +219,18 @@ class AttachmentDownloadError(RuntimeError):
 def _download_error_from_exception(exc):
     if isinstance(exc, TimeoutError):
         return AttachmentDownloadError(
-            "timeout", "Файл не скачан: Telegram слишком долго готовил файл. Попробуй ещё раз или дай ссылку."
+            "timeout", t('telegram_api_download_error_from_exception_1')
         )
     if isinstance(exc, PermissionError):
         return AttachmentDownloadError(
-            "local_file_access", "Файл не скачан: нет доступа к файлу локального Bot API."
+            "local_file_access", t('telegram_api_download_error_from_exception_2')
         )
     if isinstance(exc, (urllib.error.URLError, ConnectionError, OSError)):
         return AttachmentDownloadError(
-            "network", "Файл не скачан: ошибка связи с Telegram. Попробуй ещё раз или дай ссылку."
+            "network", t('telegram_api_download_error_from_exception_3')
         )
     return AttachmentDownloadError(
-        "download_failed", "Файл не скачан: Telegram не дал получить файл. Попробуй ещё раз или дай ссылку."
+        "download_failed", t('telegram_api_download_error_from_exception_4')
     )
 
 
@@ -237,18 +239,18 @@ def _get_file_error(result):
     if not LOCAL_BOT_API and "file is too big" in detail:
         return AttachmentDownloadError(
             "too_big_for_cloud",
-            "Файл не скачан: размер превышает облачный лимит Telegram 20 МБ. Включи локальный Bot API или дай ссылку.",
+            t('telegram_api_get_file_error_1'),
         )
     if "timeout" in detail or "timed out" in detail:
         return AttachmentDownloadError(
-            "timeout", "Файл не скачан: Telegram слишком долго готовил файл. Попробуй ещё раз или дай ссылку."
+            "timeout", t('telegram_api_download_error_from_exception_1')
         )
     if result.get("error"):
         return AttachmentDownloadError(
-            "network", "Файл не скачан: ошибка связи с Telegram. Попробуй ещё раз или дай ссылку."
+            "network", t('telegram_api_download_error_from_exception_3')
         )
     return AttachmentDownloadError(
-        "get_file_failed", "Файл не скачан: Telegram отказал в выдаче файла. Отправь его снова или дай ссылку."
+        "get_file_failed", t('telegram_api_get_file_error_2')
     )
 
 
@@ -257,7 +259,7 @@ def download_telegram_file(chat_id, file_id, filename_hint=None, file_size=None)
     if not LOCAL_BOT_API and isinstance(file_size, int) and file_size > TELEGRAM_CLOUD_FILE_MAX_BYTES:
         raise AttachmentDownloadError(
             "too_big_for_cloud",
-            "Файл не скачан: размер превышает облачный лимит Telegram 20 МБ. Включи локальный Bot API или дай ссылку.",
+            t('telegram_api_get_file_error_1'),
         )
     result = tg_call("getFile", {"file_id": file_id}, timeout=GET_FILE_TIMEOUT_S)
     if not result.get("ok"):
@@ -265,7 +267,7 @@ def download_telegram_file(chat_id, file_id, filename_hint=None, file_size=None)
     file_path = (result.get("result") or {}).get("file_path")
     if not file_path:
         raise AttachmentDownloadError(
-            "get_file_failed", "Файл не скачан: Telegram не вернул путь к файлу. Попробуй ещё раз или дай ссылку."
+            "get_file_failed", t('telegram_api_download_telegram_file_1')
         )
     name = re.sub(r"[^\w.\-]", "_", filename_hint or os.path.basename(file_path) or f"{file_id}.bin")
     chat_dir = os.path.join(UPLOADS_DIR, str(chat_id))
@@ -278,18 +280,18 @@ def download_telegram_file(chat_id, file_id, filename_hint=None, file_size=None)
                 source_stat = os.stat(source)
             except FileNotFoundError as exc:
                 raise AttachmentDownloadError(
-                    "local_file_missing", "Файл не скачан: локальный Bot API больше не видит этот файл. Отправь его снова или дай ссылку."
+                    "local_file_missing", t('telegram_api_download_telegram_file_2')
                 ) from exc
             except PermissionError as exc:
                 raise AttachmentDownloadError(
-                    "local_file_access", "Файл не скачан: нет доступа к файлу локального Bot API."
+                    "local_file_access", t('telegram_api_download_error_from_exception_2')
                 ) from exc
             if not os.path.isfile(source):
                 raise AttachmentDownloadError(
-                    "local_file_access", "Файл не скачан: путь локального Bot API не является доступным файлом."
+                    "local_file_access", t('telegram_api_download_telegram_file_3')
                 )
             if source_stat.st_size > MAX_DOCUMENT_BYTES:
-                raise AttachmentDownloadError("too_big", "Файл не скачан: размер превышает разрешённый лимит.")
+                raise AttachmentDownloadError("too_big", t('telegram_api_download_telegram_file_4'))
             shutil.move(source, local_path)
             return local_path
         total = 0
@@ -300,7 +302,7 @@ def download_telegram_file(chat_id, file_id, filename_hint=None, file_size=None)
                     break
                 total += len(chunk)
                 if total > MAX_DOCUMENT_BYTES:
-                    raise AttachmentDownloadError("too_big", "Файл не скачан: размер превышает разрешённый лимит.")
+                    raise AttachmentDownloadError("too_big", t('telegram_api_download_telegram_file_4'))
                 handle.write(chunk)
         return local_path
     except AttachmentDownloadError:
