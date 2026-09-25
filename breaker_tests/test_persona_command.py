@@ -53,15 +53,10 @@ def main():
     assert "owner-marker" in config
     assert "delegate-to-codex" in config and "send-telegram-file" in config
     credentials = os.path.join(owner_dir, ".credentials.json")
-    assert not os.path.islink(credentials)
-    assert '"refreshToken": "valid"' in open(credentials, encoding="utf-8").read()
-    _write(credentials, '{"claudeAiOauth": {"expiresAt": 0}}')
+    assert not os.path.lexists(credentials), "owner must log into its own isolated home"
+    _write(credentials, '{"claudeAiOauth": {"refreshToken": "tenant-token"}}')
     runtime.account_dir(runtime.OWNER_ID)
-    assert '"refreshToken": "valid"' in open(credentials, encoding="utf-8").read()
-    os.unlink(credentials)
-    os.symlink(os.path.join(TMP, ".claude", ".credentials.json"), credentials)
-    runtime.account_dir(runtime.OWNER_ID)
-    assert not os.path.islink(credentials)
+    assert '"refreshToken": "tenant-token"' in open(credentials, encoding="utf-8").read()
     migrated_session = os.path.join(owner_dir, "projects", "-tmp", "legacy-session.jsonl")
     assert open(migrated_session, encoding="utf-8").read() == "legacy conversation\n"
     _write(

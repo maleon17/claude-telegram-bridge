@@ -256,12 +256,7 @@ def default_claude_config_dir():
 
 
 def _ensure_tenant_credentials(path, source):
-    """Seed a tenant with refreshable credentials without a fragile symlink.
-
-    Claude CLI replaces its credentials file atomically during token refresh,
-    which turns a symlink into an independent file.  Recover an old broken
-    symlink or a failed-refresh file only when the source has a refresh token.
-    """
+    """Seed a new delegated home once; never overwrite its OAuth state."""
     def refreshable(candidate):
         try:
             with open(candidate, encoding="utf-8") as handle:
@@ -270,7 +265,7 @@ def _ensure_tenant_credentials(path, source):
         except (OSError, ValueError, AttributeError):
             return False
 
-    if (not os.path.islink(path) and refreshable(path)) or not refreshable(source):
+    if (os.path.exists(path) and not os.path.islink(path)) or not refreshable(source):
         return
     temporary = f"{path}.{uuid.uuid4().hex}.tmp"
     try:
@@ -386,10 +381,6 @@ def account_dir(chat_id, state_key=None):
         else:
             shutil.copyfile(os.path.join(repo_dir, "HANDOFF.md"), os.path.join(d, "handoff.md"))
     if owner:
-        _ensure_tenant_credentials(
-            os.path.join(d, ".credentials.json"),
-            os.path.join(default_claude_config_dir(), ".credentials.json"),
-        )
         _migrate_owner_projects(d)
     # Idempotent (marker-guarded, append-only if missing) for everyone,
     # owner included -- without it, the owner's migrated CLAUDE.md has no

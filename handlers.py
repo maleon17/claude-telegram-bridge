@@ -1322,10 +1322,8 @@ def _cleanup_login(chat_id, info, terminate=True):
 def start_login(chat_id, state):
     """Start Claude's interactive OAuth flow and relay it through Telegram.
 
-    Non-owner chats use their isolated account directory.  The owner uses
-    the normal ``~/.claude`` directory, but the login process and its FIFO
-    live in this bridge's private runtime directory so ``/login`` works
-    remotely without requiring an SSH shell on the host.
+    Every chat, including the owner, logs into its isolated account
+    directory. The FIFO lives there so ``/login`` works remotely.
     """
     config_dir = account_dir(chat_id)
     login_dir = config_dir or os.path.join(os.path.dirname(__file__), "login")

@@ -99,9 +99,12 @@ personality or house rules, drop a `CLAUDE.md` into its config dir or its
 workspace — see `personality.example.md` in this repo for a starting point.
 
 Multi-tenancy: `whitelist.txt` (hand-edited, reloaded every message, no
-restart) gates access. Each non-owner chat gets an isolated
-`CLAUDE_CONFIG_DIR` under `accounts/<chat_id>/` with its own OAuth login —
-fully separate sessions and billing from the owner.
+restart) gates access. Every chat, including the owner, has an isolated
+`CLAUDE_CONFIG_DIR` under `accounts/<chat_id>/` and its own `/login` OAuth
+flow. Do not share `.credentials.json` with `~/.claude` by symlink or copy:
+Claude CLI replaces this file during refresh, and independent homes need
+independent logins. Existing session files are copied once when the owner
+tenant is created so `/resume` continues to work after migration.
 
 ## Self-test: adversarial tester + userbot test channel
 
