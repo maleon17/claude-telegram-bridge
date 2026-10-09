@@ -1587,8 +1587,28 @@ def feed_login_code(chat_id, code, state):
                         set_account_status(state, target_key, "ready")
                         success_message = t('handlers_check_2')
                     else:
-                        set_account_status(state, target_key, "awaiting_display_name")
-                        success_message = t('handlers_check_3')
+                        # A re-login (OAuth token just naturally expired, not
+                        # a brand-new tenant) must not re-ask for a display
+                        # name -- the <user> placeholder is only ever present
+                        # in a persona that was never onboarded; an already-
+                        # customized persona (including one where the owner
+                        # edited it further via /persona) has it replaced,
+                        # so that's the real signal, not "is this the first
+                        # login ever" (caught live 2026-10-09: every non-owner
+                        # tenant got re-asked their name on every re-login).
+                        persona_path = _persona_path(chat_id)
+                        needs_name = True
+                        try:
+                            with open(persona_path, encoding="utf-8") as f:
+                                needs_name = "<user>" in f.read()
+                        except FileNotFoundError:
+                            pass
+                        if needs_name:
+                            set_account_status(state, target_key, "awaiting_display_name")
+                            success_message = t('handlers_check_3')
+                        else:
+                            set_account_status(state, target_key, "ready")
+                            success_message = t('handlers_check_2')
                     _cleanup_login(chat_id, info)
                     # A persistent Claude process may have cached the expired
                     # OAuth session.  Recreate it on the next prompt so the
