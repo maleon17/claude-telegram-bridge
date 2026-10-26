@@ -96,12 +96,12 @@ GET_FILE_TIMEOUT_S = env_positive_int(
 SEND_TIMEOUT_S = env_positive_int(
     "TELEGRAM_SEND_TIMEOUT_S", 600 if LOCAL_BOT_API else 60,
 )
-FILE_PATH_RE = re.compile(
-    r"(/(?:[\w.\-]+/)+[\w.\-]+\.(?:"
-    r"png|jpe?g|gif|webp|bmp|svg|pdf|zip|tar|gz|txt|md|csv|json"
-    r"|py|js|ts|html|mp3|mp4|wav|docx?|xlsx?|pptx?"
-    r")\b)"
-)
+FILE_PATH_RE = re.compile(r"(/(?:[\w.\-]+/)+[\w.\-]+)")
+FILE_PATH_EXTENSIONS = frozenset({
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "pdf", "zip", "tar",
+    "gz", "txt", "md", "csv", "json", "py", "js", "ts", "html", "mp3",
+    "mp4", "wav", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+})
 
 # chat_id -> {"proc", "signature", "reader_thread", "last_activity",
 # "original_prompt"} for that chat's PERSISTENT `claude --input-format=
@@ -214,6 +214,12 @@ BRIDGE_ENV_VARS = frozenset({
     "BRIDGE_EXEC_STATE_FILE",
     "CHAT_ID",
     "WAKEUP_SIGNAL_DIR",
+})
+BRIDGE_ENV_ALLOWLIST = frozenset({
+    "PATH", "HOME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE",
+    "LC_MESSAGES", "LC_NUMERIC", "LC_TIME", "TERM", "SHELL", "TMPDIR", "TZ",
+    "USER", "LOGNAME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy",
 })
 
 # Background-task wakeup (LEGACY, kept as a harmless fallback -- see 2026-
@@ -330,12 +336,14 @@ def account_dir(chat_id, state_key=None):
     if delegated:
         d = os.path.join(DELEGATED_ACCOUNTS_DIR, str(chat_id))
         os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
         legacy_link = os.path.join(d, ".credentials.json")
         if os.path.islink(legacy_link):
             os.unlink(legacy_link)
         return d
     d = os.path.join(ACCOUNTS_DIR, str(chat_id))
     os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
     claude_md = os.path.join(d, "CLAUDE.md")
     owner = str(chat_id) == str(OWNER_ID)
     seeded_default = False
@@ -407,14 +415,9 @@ def _ensure_tenant_file_send_instructions(claude_md):
 
 def claude_env(config_dir, chat_id=None, extra_env=None):
     parent_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    env = {
-        key: value for key, value in os.environ.items()
-        if key not in BRIDGE_ENV_VARS
-    }
+    env = {key: os.environ[key] for key in BRIDGE_ENV_ALLOWLIST if key in os.environ}
     if extra_env:
         env.update(extra_env)
-    for key in BRIDGE_ENV_VARS:
-        env.pop(key, None)
     if config_dir:
         env["CLAUDE_CONFIG_DIR"] = config_dir
     elif parent_config_dir:

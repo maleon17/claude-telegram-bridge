@@ -13,7 +13,7 @@ import uuid
 from strings import t
 
 from runtime import (
-    API_BASE, FILE_API_BASE, FILE_PATH_RE, GET_FILE_TIMEOUT_S, IMAGE_EXTS,
+    API_BASE, FILE_API_BASE, FILE_PATH_EXTENSIONS, FILE_PATH_RE, GET_FILE_TIMEOUT_S, IMAGE_EXTS,
     LOCAL_BOT_API, MAX_DOCUMENT_BYTES, MAX_MSG_LEN, MAX_PHOTO_BYTES,
     RICH_MAX_CHARS, SEND_TIMEOUT_S, TELEGRAM_CLOUD_FILE_MAX_BYTES, UPLOADS_DIR,
 )
@@ -348,6 +348,9 @@ def extract_existing_files(text):
     seen = set()
     for m in FILE_PATH_RE.finditer(text or ""):
         path = m.group(1)
+        filename = path.rsplit("/", 1)[-1]
+        if "." not in filename or filename.rsplit(".", 1)[-1].lower() not in FILE_PATH_EXTENSIONS:
+            continue
         if path in seen:
             continue
         seen.add(path)

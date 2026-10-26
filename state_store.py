@@ -57,6 +57,7 @@ def save_state(state):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, STATE_FILE)
 
 

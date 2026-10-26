@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+UMask=0077
 User=__USER__
 WorkingDirectory=__INSTALL_DIR__
 Environment=PATH=__HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

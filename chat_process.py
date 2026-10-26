@@ -80,6 +80,7 @@ def write_last_turn(chat_id, text, delegated=False, ok=True):
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"text": text, "ts": time.time(), "ok": bool(ok)}, f)
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except OSError:
         pass
