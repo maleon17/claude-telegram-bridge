@@ -23,11 +23,11 @@ from runtime import (
 from state_store import (
     _set_chat_language, clear_pending_prompt, clear_session, delegate_key, fetch_account_limits,
     get_account_status, get_delegate_resume_selected, get_effort, get_language, get_model, get_pending_prompt, get_permission_mode,
-    get_session, get_usage, get_workspace, list_sessions, pop_delegate_request_id,
+    get_session, get_usage, get_voice_language, get_workspace, list_sessions, pop_delegate_request_id,
     projects_dir_for,
     request_restart, session_message_count, set_account_status, set_effort, set_model,
     set_delegate_request_id, set_delegate_resume_selected, set_pending_delegator, set_permission_mode, set_session,
-    set_workspace, set_language,
+    set_voice_language, set_workspace, set_language,
 )
 from chat_process import (
     _stop_chat_process, send_turn_to_chat_process, write_last_turn, write_request_result,
@@ -40,15 +40,19 @@ from telegram_format import format_message
 MODEL_CATALOG = [
     {"id": "claude-fable-5", "name": "Fable 5", "family": "fable", "version": "5", "efforts": ("low", "medium", "high", "xhigh", "max")},
     {"id": "claude-fable-5-1", "name": "Fable 5.1", "family": "fable", "version": "5.1", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-fable-5-2", "name": "Fable 5.2", "family": "fable", "version": "5.2", "efforts": ("low", "medium", "high", "xhigh", "max"), "temporary": True},
     {"id": "claude-opus-4-5", "name": "Opus 4.5", "family": "opus", "version": "4.5", "efforts": ("low", "medium", "high")},
     {"id": "claude-opus-4-6", "name": "Opus 4.6", "family": "opus", "version": "4.6", "efforts": ("low", "medium", "high", "max")},
     {"id": "claude-opus-4-7", "name": "Opus 4.7", "family": "opus", "version": "4.7", "efforts": ("low", "medium", "high", "xhigh", "max")},
     {"id": "claude-opus-4-8", "name": "Opus 4.8", "family": "opus", "version": "4.8", "efforts": ("low", "medium", "high", "xhigh", "max")},
     {"id": "claude-opus-5", "name": "Opus 5", "family": "opus", "version": "5", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-opus-5-5", "name": "Opus 5.5", "family": "opus", "version": "5.5", "efforts": ("low", "medium", "high", "xhigh", "max")},
     {"id": "claude-sonnet-4-5", "name": "Sonnet 4.5", "family": "sonnet", "version": "4.5", "efforts": ()},
     {"id": "claude-sonnet-4-6", "name": "Sonnet 4.6", "family": "sonnet", "version": "4.6", "efforts": ("low", "medium", "high", "max")},
     {"id": "claude-sonnet-5", "name": "Sonnet 5", "family": "sonnet", "version": "5", "efforts": ("low", "medium", "high", "xhigh", "max")},
+    {"id": "claude-sonnet-5-5", "name": "Sonnet 5.5", "family": "sonnet", "version": "5.5", "efforts": ("low", "medium", "high", "xhigh", "max")},
     {"id": "claude-haiku-4-5", "name": "Haiku 4.5", "family": "haiku", "version": "4.5", "efforts": ()},
+    {"id": "claude-haiku-5-5", "name": "Haiku 5.5", "family": "haiku", "version": "5.5", "efforts": ("low", "medium", "high", "xhigh", "max")},
 ]
 MODEL_ALIASES = tuple(dict.fromkeys(model["family"] for model in MODEL_CATALOG))
 ALL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -140,7 +144,8 @@ def render_model_picker(current_model, current_effort):
     models.sort(key=lambda model: MODEL_PICKER_FAMILIES.index(model["family"]))
     for model in models:
         marker = "●" if model["id"] == current_model else "○"
-        lines.append(f"{marker} {model['name']} — `/model {model['id']}`")
+        suffix = f" {t('model_temporary_marker')}" if model.get("temporary") else ""
+        lines.append(f"{marker} {model['name']}{suffix} — `/model {model['id']}`")
     marker = "●" if current_model is None else "○"
     lines.append(t('handlers_render_model_picker_2', value0=marker))
     lines.append(t('handlers_render_model_picker_3', value0=_effort_label(current_model, current_effort)))
@@ -915,6 +920,26 @@ def handle_command(chat_id, text, state, offset=None):
             return True
         set_permission_mode(state, chat_id, choice)
         send_message(chat_id, t('handlers_handle_command_26', value0=choice))
+        return True
+
+    if cmd == "voicelang":
+        choices = ("uk", "ru", "en", "auto")
+        if not arg:
+            send_message(
+                chat_id,
+                f"Мова розпізнавання голосу: {get_voice_language(state, chat_id)}.\n"
+                f"Змінити: /voicelang {'|'.join(choices)} (auto — автовизначення).",
+            )
+            return True
+        choice = arg.lower().strip()
+        if choice not in choices:
+            send_message(
+                chat_id,
+                f"Невідоме значення «{arg}». Доступно: {', '.join(choices)}.",
+            )
+            return True
+        set_voice_language(state, chat_id, choice)
+        send_message(chat_id, f"Мова розпізнавання голосу: {choice}.")
         return True
 
     if cmd == "workspace":

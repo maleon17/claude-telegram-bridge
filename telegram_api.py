@@ -330,16 +330,19 @@ def voice_transcription_available():
     return importlib.util.find_spec("faster_whisper") is not None
 
 
-def transcribe_voice(path):
+def transcribe_voice(path, language="uk"):
     """Local speech-to-text via faster-whisper. Lazy-loads the model on first
-    use so bridge.py startup and non-voice messages pay no extra cost."""
+    use so bridge.py startup and non-voice messages pay no extra cost. The
+    model is shared across chats; language is per-chat ("auto" -> detect)."""
     global _whisper_model
+    if not language or language == "auto":
+        language = None
     with _whisper_lock:
         if _whisper_model is None:
             from faster_whisper import WhisperModel
 
-            _whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
-        segments, _info = _whisper_model.transcribe(path, beam_size=5)
+            _whisper_model = WhisperModel("medium", device="cpu", compute_type="int8")
+        segments, _info = _whisper_model.transcribe(path, language=language, beam_size=5)
         return " ".join(seg.text.strip() for seg in segments).strip()
 
 

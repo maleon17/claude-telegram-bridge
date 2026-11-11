@@ -238,6 +238,18 @@ def set_effort(state, chat_id, effort):
         save_state(state)
 
 
+def get_voice_language(state, chat_id):
+    """Language code pinned for voice transcription (Whisper). Separate from
+    the UI locale in get_language. "auto" lets the model detect the language."""
+    return state.get(str(chat_id), {}).get("voice_language", "uk")
+
+
+def set_voice_language(state, chat_id, language):
+    with state_lock:
+        _chat_state(state, chat_id)["voice_language"] = language
+        save_state(state)
+
+
 def get_permission_mode(state, chat_id):
     """None means bypass (current default behavior, unchanged)."""
     return state.get(str(chat_id), {}).get("permission_mode")
@@ -413,18 +425,24 @@ _LIMIT_MONTHS = {month: index for index, month in enumerate(
 
 def _localize_limit_line(line):
     match = re.fullmatch(
-        r"(Current session|Current week(?: \(all models\))?):\s*(\d+)% used\s*[·•]\s*resets\s+(.+)",
+        r"(Current session|Current week)(?: \((.+?)\))?:\s*(\d+)% used\s*[·•]\s*resets\s+(.+)",
         line,
     )
     if not match:
         return line
-    label = t("account_limit_session" if match.group(1) == "Current session" else "account_limit_week")
-    reset = match.group(3)
+    base, qualifier = match.group(1), match.group(2)
+    if base == "Current session":
+        label = t("account_limit_session")
+    elif qualifier is None or qualifier == "all models":
+        label = t("account_limit_week")
+    else:
+        label = t("account_limit_week_model", value0=qualifier)
+    reset = match.group(4)
     date = re.fullmatch(r"([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{1,2})(am|pm)(.*)", reset)
     if date and date.group(1) in _LIMIT_MONTHS:
         hour = int(date.group(3)) % 12 + (12 if date.group(4) == "pm" else 0)
         reset = f"{int(date.group(2)):02d}.{_LIMIT_MONTHS[date.group(1)]:02d} {hour:02d}:00{date.group(5)}"
-    return t("account_limit_line", label=label, percent=match.group(2), reset=reset)
+    return t("account_limit_line", label=label, percent=match.group(3), reset=reset)
 
 
 def fetch_account_limits(config_dir=None):

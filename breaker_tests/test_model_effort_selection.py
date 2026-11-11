@@ -30,8 +30,8 @@ def test_model_forms_and_errors():
         "opus-4-7": "claude-opus-4-7",
         "opus 4-7": "claude-opus-4-7",
         "Opus 5": "claude-opus-5",
-        "opus": "claude-opus-5",
-        "claude-opus": "claude-opus-5",
+        "opus": "claude-opus-5-5",
+        "claude-opus": "claude-opus-5-5",
         "fable 5.1": "claude-fable-5-1",
         "claude-fable-5-1": "claude-fable-5-1",
         "DEFAULT": None,
@@ -46,7 +46,7 @@ def test_model_forms_and_errors():
         else:
             raise AssertionError(f"{spec!r} should be rejected")
     picker = handlers.render_model_picker("claude-opus-5", "xhigh")
-    assert picker.splitlines()[1] == "● Opus 5 — `/model claude-opus-5`"
+    assert "● Opus 5 — `/model claude-opus-5`" in picker.splitlines()
     print("[1/4] all documented model forms resolve and bad choices fail")
 
 

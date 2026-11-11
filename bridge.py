@@ -35,7 +35,8 @@ from runtime import (
     pending_batches, pending_progress_lock, pending_progress_msg_ids, tenant_file_outbox,
 )
 from state_store import (
-    _set_chat_language, clear_pending_prompt, get_account_status, get_pending_prompt, load_state,
+    _set_chat_language, clear_pending_prompt, get_account_status, get_pending_prompt,
+    get_voice_language, load_state,
     pending_prompt_is_current,
     pop_pending_restart, pop_restart_request, set_pending_restart,
     set_permission_mode,
@@ -754,7 +755,9 @@ def _process_message(msg, state):
                     chat_id, voice["file_id"], file_size=voice.get("file_size"),
                 )
                 try:
-                    voice_text = transcribe_voice(local_path)
+                    voice_text = transcribe_voice(
+                        local_path, language=get_voice_language(state, chat_id),
+                    )
                 except Exception:
                     print(traceback.format_exc()[-1500:], flush=True)
                 if not voice_text:
