@@ -14,6 +14,7 @@ whitelist.txt
 accounts/
 uploads_*/
 __pycache__/
+.venv/
 *.pyc
 
 # Real systemd units (contain live bot tokens) -- only *.service.example is tracked

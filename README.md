@@ -38,7 +38,7 @@ A session can survive bot restarts, be resumed later by ID, expose live progress
 ## Requirements
 
 - Linux host with `python3` (the bridge itself uses only the standard library)
-- [Claude Code CLI](https://claude.com/claude-code), authenticated with a Claude subscription
+- [Claude Code CLI](https://claude.com/claude-code) installed, and a Claude subscription (each chat authorises its own from Telegram)
 - Telegram bot token from [@BotFather](https://t.me/BotFather)
 - `systemd` for the supplied service/install workflow
 - Optional [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) for voice transcription
@@ -46,14 +46,14 @@ A session can survive bot restarts, be resumed later by ID, expose live progress
 ## Quick start
 
 ```bash
-claude auth login --claudeai
-
 git clone https://github.com/maleon17/claude-telegram-bridge.git
 cd claude-telegram-bridge
 ./setup.sh
 ```
 
-The installer asks for the bot token, Telegram owner ID and service name.
+The installer asks for the bot token, Telegram owner ID and service name, and checks the token with Telegram before installing anything. It is safe to re-run: it keeps the settings it does not manage, and an empty answer keeps the current value.
+
+Then send any message to your bot. The first time, it answers with a login button: authorise Claude in the browser and paste the code back into the chat. The bridge keeps its own isolated Claude login per chat and never reads or changes the one in `~/.claude`.
 
 ## Commands
 
@@ -89,7 +89,7 @@ The installer asks for the bot token, Telegram owner ID and service name.
 
 ## Multi-account isolation
 
-`whitelist.txt` controls who may use the bridge and is re-read for every message. Every chat receives isolated account state under `accounts/<chat_id>/`. The owner's account is migrated from the existing Claude configuration on first use; additional users authenticate through their own `claude auth login` flow.
+`whitelist.txt` controls who may use the bridge and is re-read for every message. Every chat receives isolated account state under `accounts/<chat_id>/`. On the owner's first use, their existing persona (`~/.claude/CLAUDE.md`), MCP configuration and past sessions are copied in; credentials are not, so the owner logs in from Telegram like everyone else.
 
 Additional users get their own subscription, sessions and usage rather than sharing the owner's billing or context. The owner can also re-authenticate through `/login` in Telegram.
 
@@ -124,7 +124,7 @@ SERVICE_NAME=claude-telegram-bridge.service
 CLAUDE_BIN=<path to claude>
 ```
 
-Copy `claude-telegram-bridge.service.example` to `/etc/systemd/system/claude-telegram-bridge.service` and replace `__USER__`, `__HOME__`, `__INSTALL_DIR__` and `__ENV_FILE__` (the absolute path to `bridge.env`). For `/restart` and `/update`, allow only this sudoers command:
+Copy `claude-telegram-bridge.service.example` to `/etc/systemd/system/claude-telegram-bridge.service` and replace `__USER__`, `__HOME__`, `__INSTALL_DIR__`, `__ENV_FILE__` (the absolute path to `bridge.env`) and `__PYTHON__` (`/usr/bin/python3`, or a virtualenv's interpreter if you installed `faster-whisper` into one). For `/restart` and `/update`, allow only this sudoers command:
 
 ```text
 <user> ALL=(root) NOPASSWD: /usr/bin/systemctl restart claude-telegram-bridge.service
@@ -139,6 +139,15 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now claude-telegram-bridge.service
 ```
 
+## Working together with the Codex bridge
+
+This bridge is complete on its own. If **[codex-telegram-bridge](https://github.com/maleon17/codex-telegram-bridge)** is installed on the same host, the two can hand tasks to each other:
+
+- **From a chat.** Every chat gets a `delegate_to_codex` tool. When someone asks Claude to "ask Codex" (or similar), the task is passed to the Codex bridge for that same Telegram user, and Codex's answer arrives in the Codex bot's chat. The user must be whitelisted and logged in on the Codex bridge too; nobody can delegate into someone else's account.
+- **From a shell or script.** `bridge_exec.py "<task>"` feeds a task to this running bridge without going through Telegram and prints the final answer. It is owner-only and supports `--workspace`, `--resume`, `--model`, `--effort`, `--timeout` and `--env KEY=VALUE`.
+
+The peer is found automatically when it is cloned next to this repository (as `codex-telegram-bridge`). If it lives elsewhere, set `CODEX_TELEGRAM_BRIDGE_DIR=/path/to/it` in `bridge.env` and restart. Without a Codex bridge on the host the `delegate_to_codex` tool is simply not offered.
+
 ## Tests
 
 ```bash
@@ -149,7 +158,8 @@ The suite byte-compiles modules and runs `breaker_tests/test_*.py`. Optional sib
 
 ## Troubleshooting
 
-- **Bot is silent:** inspect `journalctl -u <service-name> -f` and verify `claude auth status`.
+- **Bot is silent:** inspect `journalctl -u <service-name> -f`; a mistyped token shows up there as repeated `getUpdates not ok`.
+- **Claude says it is not logged in:** send `/login` to the bot — each chat has its own Claude login.
 - **Missing `OWNER_ID` / `TELEGRAM_BOT_TOKEN`:** check `bridge.env` and the unit's `EnvironmentFile=`.
 - **`/restart` fails:** verify the sudoers rule matches `SERVICE_NAME`, including `.service`.
 - **A user's login is stuck:** check for an old `claude auth login` process; `/login` can start the flow again.

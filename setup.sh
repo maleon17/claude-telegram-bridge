@@ -2,35 +2,78 @@
 # Interactive installer for the Claude Code <-> Telegram bridge.
 #
 # What this script does:
-#   - checks python3 and the `claude` CLI are present
-#   - checks you're already logged in via `claude auth login` (this part is
-#     NOT automated -- it's an interactive browser OAuth flow, run it
-#     yourself first if needed)
-#   - asks for your bot token / Telegram ID / install directory
+#   - checks python3, systemd and the `claude` CLI are present
+#   - asks for your bot token / Telegram ID / service name and verifies the
+#     token with Telegram before anything is installed
 #   - writes bridge.env (bot token, owner id, service name, claude path;
 #     mode 600) and a systemd unit from claude-telegram-bridge.service.example
 #     that reads it, then installs the unit as a system service
 #   - installs a sudoers rule allowing only `systemctl restart <service>`,
 #     which /restart and /update need
-#   - optionally installs faster-whisper for voice messages
+#   - optionally installs faster-whisper for voice messages (into a private
+#     virtualenv, so it also works on distributions that forbid pip --user)
 #
-# Safe to re-run: it only overwrites bridge.env, the generated unit and
-# its sudoers rule.
+# Claude itself is authorised later, from Telegram: every chat (the owner
+# included) has its own isolated Claude login, and the bot walks you through
+# it on your first message.
+#
+# Safe to re-run: bridge.env keeps every key this script does not manage
+# (for example TELEGRAM_API_URL after a switch to a local Bot API server), and
+# an empty answer keeps the current token / owner / service name.
+#
+# Every question can be answered through the environment instead (BOT_TOKEN,
+# OWNER_ID, SERVICE_NAME, LOCAL_BOT_API_SETUP=y|n, INSTALL_VOICE=y|n,
+# ASSUME_YES=1), which makes an unattended install possible.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+die() { echo "ERROR: $*" >&2; exit 1; }
+as_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+# ask VAR "prompt" [default] [secret] -- a value already in the environment
+# wins, then an interactive answer, then the default.
+ask() {
+    local variable="$1" prompt="$2" fallback="${3:-}" secret="${4:-}" value="${!1:-}"
+    if [[ -z "$value" && -t 0 ]]; then
+        if [[ -n "$secret" ]]; then read -r -s -p "$prompt" value || value=""; echo
+        else read -r -p "$prompt" value || value=""; fi
+    fi
+    printf -v "$variable" '%s' "${value:-$fallback}"
+}
+# env_file_set FILE KEY VALUE -- replace one key, keep every other line.
+env_file_set() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import os, sys
+path, key, value = sys.argv[1:4]
+try:
+    lines = open(path, encoding="utf-8").read().splitlines()
+except FileNotFoundError:
+    lines = []
+lines = [line for line in lines if not line.startswith(key + "=")]
+lines.append(f"{key}={value}")
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines) + "\n")
+os.replace(tmp, path)
+PY
+}
+env_file_get() { [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" | tail -n 1 || true; }
+
 echo "== Claude Code <-> Telegram bridge setup =="
 echo
 
 # --- prerequisites -----------------------------------------------------
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "python3 not found. Install it first (e.g. 'sudo apt install python3') and re-run this script."
-    exit 1
-fi
+command -v python3 >/dev/null 2>&1 \
+    || die "python3 not found. Install it first (e.g. 'sudo apt install python3') and re-run this script."
+SYSTEMCTL_BIN="$(command -v systemctl || true)"
+[[ -n "$SYSTEMCTL_BIN" ]] \
+    || die "systemd (systemctl) not found. This installer sets the bridge up as a systemd service; see 'Manual install' in the README for other setups."
+[[ $EUID -eq 0 ]] || command -v sudo >/dev/null 2>&1 \
+    || die "sudo not found. It is needed to install the service unit and for the bot's /restart command."
 
 CLAUDE_BIN="$(command -v claude || true)"
 if [ -z "$CLAUDE_BIN" ] && [ -x "$HOME/.local/bin/claude" ]; then
@@ -44,75 +87,96 @@ if [ -z "$CLAUDE_BIN" ]; then
     exit 1
 fi
 echo "Found Claude Code CLI: $CLAUDE_BIN"
-
-if ! "$CLAUDE_BIN" auth status 2>/dev/null | grep -q '"loggedIn": true\|loggedIn.*true'; then
-    echo
-    echo "You're not logged in to Claude Code yet (needs a Pro/Team/Max subscription --"
-    echo "this bridge runs on your subscription, not a metered API key)."
-    echo "Run this yourself first (it opens a browser for OAuth login):"
-    echo "  $CLAUDE_BIN auth login --claudeai"
-    echo "Then re-run this script."
-    exit 1
-fi
-echo "Claude Code is authenticated."
 echo
 
 # --- gather config -------------------------------------------------------
 
-read -rp "Telegram bot token (from @BotFather): " BOT_TOKEN
-if [ -z "$BOT_TOKEN" ]; then
-    echo "A bot token is required."
-    exit 1
-fi
-
-read -rp "Your Telegram numeric user ID (message @userinfobot to get it): " OWNER_ID
-if ! [[ "$OWNER_ID" =~ ^[0-9]+$ ]]; then
-    echo "Owner ID must be numeric."
-    exit 1
-fi
-
-read -rp "Service name [claude-telegram-bridge]: " SERVICE_NAME
-SERVICE_NAME="${SERVICE_NAME:-claude-telegram-bridge}"
-SERVICE_NAME="${SERVICE_NAME%.service}"
-if ! [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$ ]]; then
-    echo "Service name may only contain letters, digits, '_', '.', '@' and '-'."
-    exit 1
-fi
-
-INSTALL_USER="$(whoami)"
+INSTALL_USER="$(id -un)"
 INSTALL_HOME="$HOME"
 INSTALL_DIR="$SCRIPT_DIR"
 ENV_FILE="$INSTALL_DIR/bridge.env"
-SYSTEMCTL_BIN="$(command -v systemctl)"
+PREV_TOKEN="$(env_file_get "$ENV_FILE" TELEGRAM_BOT_TOKEN)"
+PREV_OWNER="$(env_file_get "$ENV_FILE" OWNER_ID)"
+PREV_SERVICE="$(env_file_get "$ENV_FILE" SERVICE_NAME)"
+PREV_SERVICE="${PREV_SERVICE%.service}"
+EXISTING_API_URL="$(env_file_get "$ENV_FILE" TELEGRAM_API_URL)"
+
+ask BOT_TOKEN "Telegram bot token (from @BotFather)${PREV_TOKEN:+ [keep current]}: " "$PREV_TOKEN" secret
+[[ -n "$BOT_TOKEN" ]] || die "A bot token is required."
+[[ "$BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "That does not look like a bot token (expected <digits>:<letters>)."
+
+# A typo here would otherwise leave a 'running' service and a silent bot.
+if [[ "${SKIP_TOKEN_CHECK:-}" != 1 ]]; then
+    TELEGRAM_TOKEN_TO_CHECK="$BOT_TOKEN" TELEGRAM_API_BASE_TO_CHECK="${EXISTING_API_URL%/}" python3 - <<'PY' \
+        || die "Bot token check failed (set SKIP_TOKEN_CHECK=1 to install without contacting Telegram)."
+import json, os, sys, urllib.error, urllib.request
+base = os.environ["TELEGRAM_API_BASE_TO_CHECK"] or "https://api.telegram.org"
+token = os.environ["TELEGRAM_TOKEN_TO_CHECK"]
+try:
+    with urllib.request.urlopen(f"{base}/bot{token}/getMe", timeout=15) as response:
+        result = json.load(response)
+except urllib.error.HTTPError as exc:
+    print(f"Telegram rejected this bot token (HTTP {exc.code}).", file=sys.stderr)
+    raise SystemExit(1)
+except Exception as exc:
+    print(f"Could not reach Telegram at {base}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+if not result.get("ok"):
+    print("Telegram rejected this bot token.", file=sys.stderr)
+    raise SystemExit(1)
+print("Telegram bot token: valid (@%s)" % result["result"].get("username", "unknown"))
+PY
+fi
+
+ask OWNER_ID "Your Telegram numeric user ID (message @userinfobot to get it)${PREV_OWNER:+ [$PREV_OWNER]}: " "$PREV_OWNER"
+[[ "$OWNER_ID" =~ ^[0-9]+$ ]] || die "Owner ID must be numeric."
+
+ask SERVICE_NAME "Service name [${PREV_SERVICE:-claude-telegram-bridge}]: " "${PREV_SERVICE:-claude-telegram-bridge}"
+SERVICE_NAME="${SERVICE_NAME%.service}"
+[[ "$SERVICE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$ ]] \
+    || die "Service name may only contain letters, digits, '_', '.', '@' and '-'."
 
 echo
 echo "Will install as systemd service '$SERVICE_NAME', running as user '$INSTALL_USER',"
 echo "from '$INSTALL_DIR'. Secrets go to $ENV_FILE (mode 600), not into the unit."
-read -rp "Continue? [y/N] " CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-    echo "Aborted."
-    exit 0
+if [[ "${ASSUME_YES:-}" != 1 ]]; then
+    [[ -t 0 ]] || die "No terminal: set ASSUME_YES=1 to install unattended."
+    read -rp "Continue? [y/N] " CONFIRM || CONFIRM=""
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
 fi
 
 # /update can optionally build and switch to the loopback-only Telegram Bot
 # API server.  Its service still needs a separate, narrowly scoped restart
 # grant; do not create that grant for installations that opt out here.
 TELEGRAM_BOT_API_UNIT="${TELEGRAM_BOT_API_UNIT:-telegram-bot-api}"
-if ! [[ "$TELEGRAM_BOT_API_UNIT" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
-    echo "Telegram Bot API unit name may only contain letters, digits, '_', '.', '@' and '-'."
-    exit 1
-fi
-read -rp "Allow /update to configure the optional local Bot API server (files up to 2 GB)? [y/N] " LOCAL_BOT_API_SETUP
+[[ "$TELEGRAM_BOT_API_UNIT" =~ ^[A-Za-z0-9_.@-]+$ ]] \
+    || die "Telegram Bot API unit name may only contain letters, digits, '_', '.', '@' and '-'."
+PREV_LOCAL_UNIT="$(env_file_get "$ENV_FILE" TELEGRAM_BOT_API_UNIT)"
+ask LOCAL_BOT_API_SETUP "Allow /update to configure the optional local Bot API server (files up to 2 GB)? [y/N] " "${PREV_LOCAL_UNIT:+y}"
 
 # --- optional: local voice transcription ---------------------------------
+# faster-whisper goes into a private virtualenv: `pip install --user` is
+# refused outright on PEP 668 distributions (Debian 12+, Ubuntu 23.04+).
 
-if python3 -c "import faster_whisper" >/dev/null 2>&1; then
+PYTHON_BIN="$(command -v python3)"
+VOICE_VENV="$INSTALL_DIR/.venv"
+if [[ -x "$VOICE_VENV/bin/python" ]] && "$VOICE_VENV/bin/python" -c "import faster_whisper" >/dev/null 2>&1; then
+    PYTHON_BIN="$VOICE_VENV/bin/python"
+    echo "faster-whisper is installed in $VOICE_VENV: voice messages will be transcribed."
+elif python3 -c "import faster_whisper" >/dev/null 2>&1; then
     echo "faster-whisper is installed: voice messages will be transcribed."
 else
-    read -rp "Install faster-whisper for voice messages (optional, large download)? [y/N] " VOICE
-    if [[ "$VOICE" =~ ^[Yy]$ ]]; then
-        python3 -m pip install --user faster-whisper \
-            || echo "faster-whisper install failed -- voice messages will get an explanatory reply instead."
+    ask INSTALL_VOICE "Install faster-whisper for voice messages (optional, large download)? [y/N] " ""
+    if [[ "$INSTALL_VOICE" =~ ^[Yy]$ ]]; then
+        if python3 -m venv "$VOICE_VENV" \
+                && "$VOICE_VENV/bin/python" -m pip install --quiet --upgrade pip \
+                && "$VOICE_VENV/bin/python" -m pip install --quiet faster-whisper; then
+            PYTHON_BIN="$VOICE_VENV/bin/python"
+            echo "faster-whisper installed into $VOICE_VENV."
+        else
+            echo "faster-whisper install failed (Debian/Ubuntu may need: sudo apt install python3-venv)"
+            echo "-- voice messages will get an explanatory reply instead."
+        fi
     else
         echo "Skipping: voice messages will get an explanatory reply instead of a transcript."
     fi
@@ -123,54 +187,57 @@ fi
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-umask 077
-{
-    printf 'TELEGRAM_BOT_TOKEN=%s\n' "$BOT_TOKEN"
-    printf 'OWNER_ID=%s\n' "$OWNER_ID"
-    printf 'SERVICE_NAME=%s.service\n' "$SERVICE_NAME"
-    printf 'CLAUDE_BIN=%s\n' "$CLAUDE_BIN"
-    if [[ "$LOCAL_BOT_API_SETUP" =~ ^[Yy]$ ]]; then
-        printf 'TELEGRAM_BOT_API_UNIT=%s\n' "$TELEGRAM_BOT_API_UNIT"
-    fi
-} > "$WORK_DIR/bridge.env"
-install -m 600 "$WORK_DIR/bridge.env" "$ENV_FILE"
-umask 022
+env_file_set "$ENV_FILE" TELEGRAM_BOT_TOKEN "$BOT_TOKEN"
+env_file_set "$ENV_FILE" OWNER_ID "$OWNER_ID"
+env_file_set "$ENV_FILE" SERVICE_NAME "$SERVICE_NAME.service"
+env_file_set "$ENV_FILE" CLAUDE_BIN "$CLAUDE_BIN"
+if [[ "$LOCAL_BOT_API_SETUP" =~ ^[Yy]$ ]]; then
+    env_file_set "$ENV_FILE" TELEGRAM_BOT_API_UNIT "$TELEGRAM_BOT_API_UNIT"
+fi
+chmod 600 "$ENV_FILE"
 
 sed \
     -e "s|__USER__|${INSTALL_USER}|g" \
     -e "s|__HOME__|${INSTALL_HOME}|g" \
     -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
     -e "s|__ENV_FILE__|${ENV_FILE}|g" \
+    -e "s|__PYTHON__|${PYTHON_BIN}|g" \
     claude-telegram-bridge.service.example > "$WORK_DIR/unit.service"
 
-# /restart and /update restart the bridge through `sudo -n`; if the owner
-# opted into the local server, grant exactly its restart too and nothing else.
-{
-    printf '%s ALL=(root) NOPASSWD: %s restart %s.service\n' \
-        "$INSTALL_USER" "$SYSTEMCTL_BIN" "$SERVICE_NAME"
-    if [[ "$LOCAL_BOT_API_SETUP" =~ ^[Yy]$ ]]; then
-        printf '%s ALL=(root) NOPASSWD: %s restart %s.service\n' \
-            "$INSTALL_USER" "$SYSTEMCTL_BIN" "$TELEGRAM_BOT_API_UNIT"
-    fi
-} > "$WORK_DIR/sudoers"
-if ! visudo -cf "$WORK_DIR/sudoers" >/dev/null 2>&1 && ! sudo visudo -cf "$WORK_DIR/sudoers" >/dev/null; then
-    echo "Generated sudoers rule failed validation -- not installing it."
-    exit 1
-fi
-
 echo
-echo "Installing unit and sudoers rule (requires sudo):"
-sudo install -m 644 -o root -g root "$WORK_DIR/unit.service" "/etc/systemd/system/${SERVICE_NAME}.service"
-sudo install -m 440 -o root -g root "$WORK_DIR/sudoers" "/etc/sudoers.d/${SERVICE_NAME//./_}-restart"
-sudo systemctl daemon-reload
-sudo systemctl enable --now "${SERVICE_NAME}.service"
+echo "Installing the service unit (requires sudo):"
+as_root install -m 644 -o root -g root "$WORK_DIR/unit.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+
+if [[ $EUID -ne 0 ]]; then
+    # /restart and /update restart the bridge through `sudo -n`; if the owner
+    # opted into the local server, grant exactly its restart too and nothing else.
+    {
+        printf '%s ALL=(root) NOPASSWD: %s restart %s.service\n' \
+            "$INSTALL_USER" "$SYSTEMCTL_BIN" "$SERVICE_NAME"
+        if [[ "$LOCAL_BOT_API_SETUP" =~ ^[Yy]$ ]]; then
+            printf '%s ALL=(root) NOPASSWD: %s restart %s.service\n' \
+                "$INSTALL_USER" "$SYSTEMCTL_BIN" "$TELEGRAM_BOT_API_UNIT"
+        fi
+    } > "$WORK_DIR/sudoers"
+    if ! visudo -cf "$WORK_DIR/sudoers" >/dev/null 2>&1 && ! sudo visudo -cf "$WORK_DIR/sudoers" >/dev/null; then
+        die "Generated sudoers rule failed validation -- not installing it."
+    fi
+    sudo install -m 440 -o root -g root "$WORK_DIR/sudoers" "/etc/sudoers.d/${SERVICE_NAME//./_}-restart"
+fi
+as_root systemctl daemon-reload
+as_root systemctl enable "${SERVICE_NAME}.service"
+# restart, not just start: a re-run must pick up the new bridge.env.
+as_root systemctl restart "${SERVICE_NAME}.service"
 
 echo
 echo "Done. Checking status:"
-sudo systemctl status "${SERVICE_NAME}.service" --no-pager || true
+as_root systemctl status "${SERVICE_NAME}.service" --no-pager || true
 
 echo
-echo "Next: message your bot on Telegram to start using it."
+echo "Next: send any message to your bot on Telegram. The first time, it replies"
+echo "with a login button: authorise Claude in the browser and paste the code back"
+echo "into the chat. (This is the bridge's own isolated Claude login; it does not"
+echo "use or change the one in ~/.claude.)"
 echo "Logs:   journalctl -u ${SERVICE_NAME}.service -f"
 echo "Whitelist for other users: edit whitelist.txt in $INSTALL_DIR (comma/newline-separated IDs, no restart needed)."
 

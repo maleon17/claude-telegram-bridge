@@ -402,8 +402,11 @@ def test_c05_c06_c09_installer_keeps_secrets_out_of_the_unit():
     with open(os.path.join(ROOT, "setup.sh")) as handle:
         setup = handle.read()
     assert 'UNIT_FILE="/tmp/' not in setup
-    assert "mktemp -d" in setup and "install -m 600" in setup
-    assert "SERVICE_NAME=%s.service" in setup and "CLAUDE_BIN=%s" in setup
+    # The env file is created 0600 from the first byte and keeps that mode.
+    assert "mktemp -d" in setup and "0o600" in setup and 'chmod 600 "$ENV_FILE"' in setup
+    assert 'SERVICE_NAME "$SERVICE_NAME.service"' in setup and 'CLAUDE_BIN "$CLAUDE_BIN"' in setup
+    # A re-run must keep keys it does not manage (e.g. TELEGRAM_API_URL).
+    assert "env_file_set" in setup and "> \"$ENV_FILE\"" not in setup
     assert "visudo -cf" in setup
     assert "^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$" in setup
     print("[C05/C06/C09] installer writes a 600 env file, validated sudoers, real CLI path")

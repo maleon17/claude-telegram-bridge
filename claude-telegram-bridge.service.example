@@ -12,7 +12,9 @@ Environment=PATH=__HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/u
 Environment=BRIDGE_WORKDIR=__HOME__
 # TELEGRAM_BOT_TOKEN, OWNER_ID, SERVICE_NAME and CLAUDE_BIN live here, mode 600.
 EnvironmentFile=__ENV_FILE__
-ExecStart=/usr/bin/python3 __INSTALL_DIR__/bridge.py
+# __PYTHON__ is the system python3, or the repo virtualenv when setup.sh
+# installed faster-whisper for voice messages.
+ExecStart=__PYTHON__ __INSTALL_DIR__/bridge.py
 Restart=always
 RestartSec=3
 

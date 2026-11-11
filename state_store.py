@@ -8,7 +8,7 @@ import time
 from strings import current_language, t
 
 from runtime import (
-    CLAUDE_BIN, COST_WARNING_USD, OWNER_ID, PROJECTS_DIR, RESTART_SIGNAL_FILE,
+    ACCOUNTS_DIR, CLAUDE_BIN, COST_WARNING_USD, OWNER_ID, PROJECTS_DIR, RESTART_SIGNAL_FILE,
     STATE_FILE, WORKDIR, claude_env, state_lock,
 )
 from telegram_api import send_message
@@ -353,14 +353,20 @@ def pending_deliveries(state):
 def get_account_status(state, chat_id):
     """None (not started) / ``awaiting_code`` / ``ready``.
 
-    The owner defaults to ready for backward compatibility. Once ``/login``
+    The owner has no stored status on installs that predate per-chat accounts,
+    so they count as ready once their own account home holds credentials. On a
+    fresh install it does not yet (credentials are never copied from
+    ``~/.claude``), and the owner is walked through ``/login`` like any other
+    chat instead of getting a raw CLI "not logged in" error. Once ``/login``
     starts, its persisted temporary status wins so the next Telegram message
     can be consumed as the OAuth code. A delegated key has no such default.
     """
     status = state.get(str(chat_id), {}).get("account_status")
     if status:
         return status
-    if str(chat_id) == str(OWNER_ID):
+    if str(chat_id) == str(OWNER_ID) and os.path.exists(
+        os.path.join(ACCOUNTS_DIR, str(OWNER_ID), ".credentials.json")
+    ):
         return "ready"
     return None
 

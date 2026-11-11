@@ -40,7 +40,27 @@ import time
 import uuid
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_OWNER_ID = 8480261623
+
+
+def configured_owner_id():
+    """The bridge owner's Telegram id: $OWNER_ID, else bridge.env next to this
+    script (the file setup.sh writes). None when neither names one."""
+    value = os.environ.get("OWNER_ID")
+    if not value:
+        env_file = os.environ.get("BRIDGE_ENV_FILE") or os.path.join(ROOT, "bridge.env")
+        try:
+            with open(env_file, encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("OWNER_ID="):
+                        value = line.partition("=")[2].strip()
+        except OSError:
+            pass
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 PRIMARY_STATE_FILE = os.path.join(ROOT, "state.json")
 PRIMARY_STATE_INSTANCE_NAME = os.path.splitext(
     os.path.basename(PRIMARY_STATE_FILE)
@@ -161,7 +181,13 @@ def main():
 
     model_spec = args.model
 
-    real_owner_id = int(os.environ.get("OWNER_ID") or DEFAULT_OWNER_ID)
+    real_owner_id = configured_owner_id()
+    if real_owner_id is None:
+        print(
+            "OWNER_ID не задан: укажи его в окружении или в bridge.env рядом со скриптом.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     chat_id = args.chat_id or real_owner_id
 
     # bridge_exec.py is an owner-only tool -- but any tenant's Claude/Codex

@@ -16,6 +16,13 @@ os.environ.pop("CLAUDE_CONFIG_DIR", None)
 os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxxxxxxxxxx"
 os.environ["OWNER_ID"] = "1000000001"
 os.environ["BRIDGE_STATE_FILE"] = os.path.join(TMP, "state.json")
+# A stand-in Codex bridge checkout, so cross-delegation is offered regardless
+# of what happens to sit next to this repository.
+_PEER = os.path.join(TMP, "codex-telegram-bridge")
+os.makedirs(_PEER)
+for _marker in ("bot.py", "delegate_to_claude_mcp.py"):
+    open(os.path.join(_PEER, _marker), "w").close()
+os.environ["CODEX_TELEGRAM_BRIDGE_DIR"] = _PEER
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)

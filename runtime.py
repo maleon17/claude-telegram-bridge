@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from strings import t
 from telegram_format import format_message, strip_mdv2, escape_mdv2
+from delegate_to_codex_mcp import codex_bridge_dir
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OWNER_ID = os.environ["OWNER_ID"]
@@ -200,6 +201,92 @@ FILE_SEND_AGENTS_SECTION = """
 только в текущий чат и не раскрывает секреты бота.
 """.strip()
 
+# One-time guidance appended to every non-owner persona: keep work out of the
+# shared home directory, and tidy up only what the agent itself created.
+WORKSPACE_RULES = {
+    "ru": """
+## Рабочая папка
+
+Не складывай файлы прямо в домашнюю директорию. Если твоя текущая рабочая
+папка — не домашняя директория, работай в ней. Иначе для каждой задачи или
+проекта используй отдельную папку: ту, что назвал пользователь, или уже
+существующую папку проекта; если такой нет — создай
+`~/projects/<короткое-имя>` и работай там.
+
+Если в домашней директории остались файлы, которые ты сам создал раньше (ты
+точно знаешь это из своей истории или памяти), при случае перенеси их в папку
+соответствующего проекта и сообщи пользователю, что и куда перенёс. Чужие
+файлы, репозитории, скрытые файлы (имя начинается с точки) и всё, в чём не
+уверен, не трогай — спроси пользователя.
+""".strip(),
+    "en": """
+## Working folder
+
+Do not drop files directly into the home directory. If your current working
+directory is not the home directory, work there. Otherwise use a separate
+folder for each task or project: the one the user named or an existing project
+folder; if there is none, create `~/projects/<short-name>` and work there.
+
+If the home directory still holds files you created earlier yourself (you know
+this for certain from your own history or memory), move them into the matching
+project folder when convenient and tell the user what went where. Do not touch
+other people's files, repositories, hidden files (names starting with a dot)
+or anything you are unsure about — ask the user.
+""".strip(),
+    "uk": """
+## Робоча папка
+
+Не складай файли прямо в домашню директорію. Якщо твоя поточна робоча папка —
+не домашня директорія, працюй у ній. Інакше для кожного завдання чи проєкту
+використовуй окрему папку: ту, яку назвав користувач, або вже наявну папку
+проєкту; якщо такої немає — створи `~/projects/<коротка-назва>` і працюй там.
+
+Якщо в домашній директорії залишилися файли, які ти сам створив раніше (ти
+точно знаєш це зі своєї історії чи пам'яті), за нагоди перенеси їх у папку
+відповідного проєкту й повідом користувачеві, що і куди перенесено. Чужі
+файли, репозиторії, приховані файли (назва починається з крапки) і все, у чому
+не впевнений, не чіпай — запитай користувача.
+""".strip(),
+    "kk": """
+## Жұмыс бумасы
+
+Файлдарды тікелей үй каталогына салма. Егер ағымдағы жұмыс бумаң үй каталогы
+болмаса, сонда жұмыс істе. Әйтпесе әр тапсырма немесе жоба үшін бөлек буманы
+қолдан: пайдаланушы атаған немесе бұрыннан бар жоба бумасын; ондай бума
+болмаса, `~/projects/<қысқа-атау>` бумасын жасап, сонда жұмыс істе.
+
+Егер үй каталогында бұрын өзің жасаған файлдар қалса (мұны өз тарихыңнан
+немесе жадыңнан нақты білесің), реті келгенде оларды тиісті жоба бумасына
+көшіріп, пайдаланушыға нені қайда көшіргеніңді айт. Бөтен файлдарға,
+репозиторийлерге, жасырын файлдарға (атауы нүктеден басталады) және сенімді
+емес нәрсенің бәріне тиіспе — пайдаланушыдан сұра.
+""".strip(),
+    "de": """
+## Arbeitsordner
+
+Lege Dateien nicht direkt im Home-Verzeichnis ab. Wenn dein aktuelles
+Arbeitsverzeichnis nicht das Home-Verzeichnis ist, arbeite dort. Andernfalls
+nutze für jede Aufgabe oder jedes Projekt einen eigenen Ordner: den vom Nutzer
+genannten oder einen bereits vorhandenen Projektordner; gibt es keinen, lege
+`~/projects/<kurzer-name>` an und arbeite dort.
+
+Liegen im Home-Verzeichnis noch Dateien, die du früher selbst erstellt hast
+(du weißt das sicher aus deinem eigenen Verlauf oder Gedächtnis), verschiebe
+sie bei Gelegenheit in den passenden Projektordner und sag dem Nutzer, was
+wohin verschoben wurde. Fremde Dateien, Repositories, versteckte Dateien (Name
+beginnt mit einem Punkt) und alles, bei dem du unsicher bist, rührst du nicht
+an — frag den Nutzer.
+""".strip(),
+}
+# The localized 'User' heading of the stock persona tells which language an
+# existing persona file is written in.
+WORKSPACE_RULES_LANGUAGE_HINTS = (
+    ("## User\n", "en"),
+    ("## Користувач\n", "uk"),
+    ("## Пайдаланушы\n", "kk"),
+    ("## Nutzer\n", "de"),
+)
+
 # These are bridge control-plane values, not Claude Code configuration.  Do
 # not let them cross the process boundary into a Claude child process.
 BRIDGE_ENV_VARS = frozenset({
@@ -282,15 +369,35 @@ def _ensure_tenant_mcp_config(config_dir):
         ("delegate-to-codex", "delegate_to_codex_mcp.py"),
         ("send-telegram-file", "send_telegram_file_mcp.py"),
     ):
+        script_path = os.path.join(repo_dir, script)
+        ours = (servers.get(name) or {}).get("args") == [script_path]
+        # CHAT_ID is deliberately never persisted here: the child must inherit
+        # the per-process id injected by claude_env(), not a stored or
+        # caller-chosen one.
+        server_env = {}
+        if name == "delegate-to-codex":
+            peer_dir = codex_bridge_dir()
+            if peer_dir is None:
+                # No Codex bridge on this host: do not offer a tool that can
+                # only fail, and withdraw the entry this bridge seeded earlier
+                # (never one the tenant pointed somewhere else).
+                if ours:
+                    del servers[name]
+                    changed = True
+                continue
+            # The MCP server runs with Claude's filtered environment, so it
+            # is told where the peer lives explicitly.
+            server_env = {"CODEX_TELEGRAM_BRIDGE_DIR": str(peer_dir)}
+            if ours and servers[name].get("env") != server_env:
+                servers[name]["env"] = server_env
+                changed = True
         if name in servers:
             continue
         servers[name] = {
             "type": "stdio",
             "command": os.path.abspath(sys.executable),
-            "args": [os.path.join(repo_dir, script)],
-            # Leave this empty: the child must inherit the per-process CHAT_ID
-            # injected by claude_env(), never a persisted or caller-chosen id.
-            "env": {},
+            "args": [script_path],
+            "env": server_env,
         }
         changed = True
     if not changed:
@@ -376,6 +483,8 @@ def account_dir(chat_id, state_key=None):
     if seeded_default:
         with open(claude_md, "rb") as handle:
             _write_default_persona_marker(d, handle.read())
+    if not owner:
+        _ensure_tenant_workspace_rules(d, claude_md)
     _ensure_tenant_mcp_config(d)
     return d
 
@@ -391,6 +500,52 @@ def _write_default_persona_marker(tenant_dir, contents):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def _ensure_tenant_workspace_rules(tenant_dir, persona_path):
+    """Append the working-folder guidance to an existing persona, exactly once.
+
+    New tenants get it from the stock persona; this reaches the ones created
+    before it existed. A flag file records that it was offered, so a tenant
+    who later removes the section does not get it back. A persona that was
+    still the unmodified default stays recognised as the default.
+    """
+    flag = os.path.join(tenant_dir, ".workspace_rules_seeded")
+    if os.path.exists(flag):
+        return
+    try:
+        with open(persona_path, encoding="utf-8") as handle:
+            content = handle.read()
+    except (FileNotFoundError, UnicodeError):
+        return
+    if not any(rules.splitlines()[0] in content for rules in WORKSPACE_RULES.values()):
+        language = next(
+            (lang for hint, lang in WORKSPACE_RULES_LANGUAGE_HINTS if hint in content), "ru",
+        )
+        marker = os.path.join(tenant_dir, ".persona_default_sha256")
+        try:
+            with open(marker, encoding="ascii") as handle:
+                was_default = (
+                    handle.read().strip()
+                    == hashlib.sha256(content.encode("utf-8")).hexdigest()
+                )
+        except (OSError, UnicodeError):
+            was_default = False
+        updated = content.rstrip() + "\n\n" + WORKSPACE_RULES[language] + "\n"
+        temporary = f"{persona_path}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temporary, "x", encoding="utf-8") as handle:
+                handle.write(updated)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, persona_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        if was_default:
+            _write_default_persona_marker(tenant_dir, updated.encode("utf-8"))
+    with open(flag, "w", encoding="ascii"):
+        pass
+    os.chmod(flag, 0o600)
 
 
 def tenant_file_outbox(chat_id):
