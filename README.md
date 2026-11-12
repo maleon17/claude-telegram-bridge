@@ -14,12 +14,10 @@ Part of **[Telegram AI](https://github.com/maleon17/telegram-ai)** — Claude Co
 
 You write to a bot; Claude Code works on the machine where your projects live — with its shell, files and tools — and reports back in the chat. It runs on your Claude subscription (Pro, Max or Team) through the official Claude Code CLI, not on a metered API key.
 
-```mermaid
-flowchart LR
-    T["You, in Telegram"] <--> B["Claude Telegram Bridge"]
-    B <--> C["Claude Code<br/>(one live process per chat)"]
-    C <--> H["Your server<br/>repos · shell · files · tools"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
+  <img alt="You and the people you let in chat with the bot; the Claude Telegram Bridge on your server keeps one live Claude Code process per chat, each with its own login, working in your repos, shell and files; optionally it delegates to the Codex bridge and acts in your Telegram account through your userbot." src="docs/architecture-light.svg" width="860">
+</picture>
 
 Each chat keeps one long-lived Claude Code process, so a conversation is a real, resumable session rather than a string of separate requests.
 
