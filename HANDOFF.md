@@ -12,36 +12,53 @@ using a Claude subscription login (Pro/Max/Team), not a metered API key. It is
 a Bot-API bot (not a userbot): you message the bot, it runs Claude Code on the
 host and streams the result back.
 
-## The four-repo ecosystem
+## The Telegram AI family
 
-This bridge is one of four small, independent projects that share design ideas
-and a couple of helper scripts but no import-level coupling:
+This bridge is one of five repositories that make up
+[Telegram AI](https://github.com/maleon17/telegram-ai). Each installs and runs
+on its own; installed on one host they find each other through a small
+registry (`~/.config/telegram-ai/registry.json`, written by every `setup.sh`;
+format in telegram-ai-core's README). There is no import-level coupling.
 
 - **Claude bridge (this repo)** — https://github.com/maleon17/claude-telegram-bridge
-  Personal Claude Code ↔ Telegram bridge, Bot-API bot, one persistent Claude
-  process per chat.
-- **Codex bot** — https://github.com/maleon17/codex-telegram-bridge
-  The same idea for Codex CLI: an interactive `codex app-server` driven from
-  Telegram, with real mid-turn steering.
-- **ClaudeAsk userbot** — https://github.com/maleon17/claude-ask
-  A Telethon userbot *module* (`.ask` / `.search` / `.translate`) with a
-  "Jarvis" persona, Claude backend. Runs as a user account, edits the caller's
-  own message in place. Backend = `claude_watcher.py` + an HTTP queue relay.
-- **CodexAsk userbot** — https://github.com/maleon17/codex-ask
-  Same as ClaudeAsk, Codex backend, `.xask` / `.xsearch` / `.xtranslate`.
+  Claude Code ↔ Telegram, Bot-API bot, one persistent Claude process per chat.
+- **Codex bridge** — https://github.com/maleon17/codex-telegram-bridge
+  The same idea for Codex: an interactive `codex app-server` per user, with
+  real mid-turn steering.
+- **ClaudeAsk** — https://github.com/maleon17/claude-ask and **CodexAsk** —
+  https://github.com/maleon17/codex-ask
+  Userbot modules (`.ask` / `.xask`) that answer in the caller's own chats,
+  each with its worker (`claude_watcher.py`, `codex_ask_watcher.py`).
+- **telegram-ai-core** — https://github.com/maleon17/telegram-ai-core
+  What the userbots share: the queue relay (`cmd_queue.py`), the Telegram
+  actions MCP server, and the one template both userbot modules are built from.
 
-`bridge_exec.py` (in this repo and in the Codex bot repo) is a thin
-file-channel: it drops a request into a local file that the *running* Codex bot
-polls and feeds straight into its own queue, so one assistant can delegate a
-task to the other without a Telegram round-trip. It is optional.
+### Working together
 
-Non-owner tenants also receive a user-scoped stdio MCP server named
-`delegate-to-codex` in their isolated `CLAUDE_CONFIG_DIR/.claude.json`. Its
-single `delegate_to_codex(prompt)` tool takes no Telegram id: it inherits the
-server-owned `CHAT_ID` from the tenant's `claude -p` process, writes a request
-to the sibling Codex bot's dedicated per-request queue, and returns only the
-immediate accept/reject status. The eventual answer arrives from the Codex bot
-in the same Telegram chat. The owner config is deliberately left unchanged.
+- **Bridge → bridge.** When the Codex bridge is on the host (registry entry or
+  a sibling checkout), every tenant's isolated `.claude.json` — the owner's
+  included — gets a stdio MCP server `delegate-to-codex`. Its
+  `delegate_to_codex(prompt, wait_seconds)` tool takes no Telegram id: it
+  inherits the server-owned `CHAT_ID` of the tenant's `claude -p` process and
+  writes one request into the Codex bridge's `cross_delegate_queue/`. The Codex
+  bridge accepts it only for a whitelisted id whose own account is `ready`,
+  runs it in that person's isolated delegate runtime, posts the answer in its
+  own chat and writes it where the acceptance said; the tool waits for that
+  answer and returns it. The Codex bridge's `delegate-to-claude` is the
+  mirror image and lands in this bridge's `cross_delegate_queue/`.
+- **Bridge → the owner's Telegram account.** `telegram_actions_link.py`: if the
+  chat's Telegram id is the registered owner of a ClaudeAsk/CodexAsk instance
+  (the relay's owners map decides, not the model), the tenant gets a
+  `telegram-actions` MCP server with a bridge token bound to exactly that
+  instance. Actions run through the owner's own userbot. Nobody gets another
+  person's instance; owning none means no tools.
+- **Userbot → bridge.** The relay's `delegate_to_bridge` tool lets the owner's
+  own `.ask`/`.xask` hand a task to this bridge (same queue, same checks) and
+  get its answer back. Triggers can never use it.
+
+Each bridge also ships `bridge_exec.py`, a thin file-channel for scripts on
+the host: it drops a request into a file that *that running bridge* polls and
+feeds into its own queue, then prints the answer. It is optional.
 
 ## Topology
 
@@ -72,6 +89,9 @@ lives in `bridge.py` because an old note says so:
 - `handlers.py` — command dispatch, turn queueing, `/login` OAuth, callbacks.
 - `telegram_format.py` — Markdown/HTML formatting helpers (MIT, third-party
   origin, attribution kept in-file).
+- `delegate_to_codex_mcp.py` — the tenant MCP server for bridge → bridge
+  delegation; `telegram_actions_link.py` — the owner's Telegram-actions
+  binding (shared verbatim with the Codex bridge).
 
 The modules share the singleton state owned by `runtime.py`; this is one
 process, not independently runnable components.
@@ -79,7 +99,7 @@ process, not independently runnable components.
 ## Deploy protocol
 
 1. Edit the relevant module.
-2. `python3 -m py_compile bridge.py runtime.py telegram_api.py state_store.py chat_process.py handlers.py`
+2. `python3 -m py_compile bridge.py runtime.py telegram_api.py state_store.py chat_process.py handlers.py telegram_actions_link.py delegate_to_codex_mcp.py`
    — catch import/syntax errors across the split before touching the live
    service.
 3. Restart. Prefer the bot's own **`/restart`** (owner-only): it is deferred
@@ -107,6 +127,11 @@ independent logins. Existing session files are copied once when the owner
 tenant is created so `/resume` continues to work after migration.
 Delegated turns use another isolated home and require `/login delegate`
 before their first use. The ordinary `/login` authenticates the chat home.
+
+Every tenant's persona also carries a short workspace rule (`WORKSPACE_RULES`
+in `runtime.py`, appended once in the persona's language): work inside the
+tenant's own working folder rather than the home directory, and move the
+tenant's own project files there when they are found lying in home.
 
 `/language en|ru|uk|kk|de` stores an interface language per chat, updates that
 chat's Telegram command menu, and changes its `CLAUDE.md` persona. Bot-authored
