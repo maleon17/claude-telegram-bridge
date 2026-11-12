@@ -24,7 +24,7 @@ from telegram_actions_link import SERVER_NAME as TELEGRAM_ACTIONS_SERVER, resolv
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OWNER_ID = os.environ["OWNER_ID"]
-WORKDIR = os.environ.get("BRIDGE_WORKDIR", "/home/mishin")
+WORKDIR = os.environ.get("BRIDGE_WORKDIR") or os.path.expanduser("~")
 STATE_FILE = os.environ.get(
     "BRIDGE_STATE_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json"),
