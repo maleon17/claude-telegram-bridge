@@ -52,13 +52,13 @@ import threading
 import time
 import uuid
 
-from _checkouts import CLAUDE_JARVIS_DIR, require
+from _checkouts import TELEGRAM_AI_CORE_DIR, require
 
 TOKEN = "breaker-test-token"
 
 # The live jarvis-ask-cmd-queue.service runs this canonical file; the old
 # ~/.hermes/scripts copy is a dead leftover and must not be tested instead.
-REAL_CMD_QUEUE_PATH = os.path.join(CLAUDE_JARVIS_DIR, "cmd_queue.py")
+REAL_CMD_QUEUE_PATH = os.path.join(TELEGRAM_AI_CORE_DIR, "cmd_queue.py")
 
 
 def _load_real_queue_handler():

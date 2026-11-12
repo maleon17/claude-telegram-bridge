@@ -1,5 +1,5 @@
-"""Helper: import the REAL, unmodified claude_ask.py from the canonical claude-jarvis checkout
-as a live Python module, by stubbing out its Hikka/herokutl framework
+"""Helper: import the REAL, unmodified claude_ask.py as built in the
+telegram-ai-core checkout (module/dist/) as a live Python module, by stubbing out its Hikka/herokutl framework
 dependencies (which aren't installed in this sandbox and aren't safe/possible
 to install here). This does NOT copy or modify claude_ask.py -- it loads the
 actual file from disk via importlib, with fake `loader`/`utils`/`_internal`
@@ -15,9 +15,9 @@ import os
 import sys
 import types
 
-from _checkouts import CLAUDE_JARVIS_DIR, require
+from _checkouts import TELEGRAM_AI_CORE_DIR, require
 
-REAL_CLAUDE_ASK_PATH = os.path.join(CLAUDE_JARVIS_DIR, "claude_ask.py")
+REAL_CLAUDE_ASK_PATH = os.path.join(TELEGRAM_AI_CORE_DIR, "module", "dist", "claude_ask.py")
 
 
 def _install_fake_herokutl():
@@ -57,6 +57,9 @@ def _install_fake_herokutl():
         "UpdateEditChannelMessage",
     ):
         setattr(types_mod, name, _make_stub(name))
+    custom_mod = types.ModuleType("herokutl.tl.custom")
+    custom_mod.Message = _make_stub("Message")
+    sys.modules["herokutl.tl.custom"] = custom_mod
 
     errors = types.ModuleType("herokutl.errors")
     for name in (
@@ -105,9 +108,20 @@ def _install_fake_hikka_package():
     loader_mod.raw_handler = _identity_decorator_factory
 
     class _Validators:
-        pass
+        """Every validator is a no-op here; the config holds plain values."""
+        def __getattr__(self, name):
+            return lambda *a, **kw: None
 
     loader_mod.validators = _Validators()
+
+    class ModuleConfig(dict):
+        def __init__(self, *values):
+            super().__init__({value.option: value.default for value in values})
+
+    loader_mod.ModuleConfig = ModuleConfig
+    loader_mod.ConfigValue = lambda option, default=None, doc="", validator=None, on_change=None: (
+        types.SimpleNamespace(option=option, default=default)
+    )
 
     utils_mod = types.ModuleType("fakepkg.utils")
 
@@ -152,6 +166,11 @@ def load_real_claude_ask_module():
     module.__package__ = "fakepkg.loaded_modules"
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
+    # The module ships unconfigured and ignores the relay until .asknet has
+    # stored these; stand in for that here.
+    module.BACKEND_URL = "http://relay.test:9092"
+    module.INSTANCE_ID = "test-instance"
+    module.RELAY_TOKEN = "test-token"
     return module
 
 

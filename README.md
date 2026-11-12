@@ -143,10 +143,19 @@ sudo systemctl enable --now claude-telegram-bridge.service
 
 This bridge is complete on its own. If **[codex-telegram-bridge](https://github.com/maleon17/codex-telegram-bridge)** is installed on the same host, the two can hand tasks to each other:
 
-- **From a chat.** Every chat gets a `delegate_to_codex` tool. When someone asks Claude to "ask Codex" (or similar), the task is passed to the Codex bridge for that same Telegram user, and Codex's answer arrives in the Codex bot's chat. The user must be whitelisted and logged in on the Codex bridge too; nobody can delegate into someone else's account.
+- **From a chat.** Every chat gets a `delegate_to_codex` tool. When someone asks Claude to "ask Codex" (or similar), the task is passed to the Codex bridge for that same Telegram user. Claude waits for Codex's final answer (ten minutes by default) and continues with it; the same answer also arrives in the Codex bot's chat. The user must be whitelisted and logged in on the Codex bridge too; nobody can delegate into someone else's account.
 - **From a shell or script.** `bridge_exec.py "<task>"` feeds a task to this running bridge without going through Telegram and prints the final answer. It is owner-only and supports `--workspace`, `--resume`, `--model`, `--effort`, `--timeout` and `--env KEY=VALUE`.
 
-The peer is found automatically when it is cloned next to this repository (as `codex-telegram-bridge`). If it lives elsewhere, set `CODEX_TELEGRAM_BRIDGE_DIR=/path/to/it` in `bridge.env` and restart. Without a Codex bridge on the host the `delegate_to_codex` tool is simply not offered.
+The peer is found automatically: both bridges record themselves in the host's component registry at install time, and a checkout next to this repository (as `codex-telegram-bridge`) is recognised too. If it lives elsewhere, set `CODEX_TELEGRAM_BRIDGE_DIR=/path/to/it` in `bridge.env` and restart. Without a Codex bridge on the host the `delegate_to_codex` tool is simply not offered.
+
+## Working together with ClaudeAsk / CodexAsk
+
+If **[ClaudeAsk](https://github.com/maleon17/claude-ask)** or **[CodexAsk](https://github.com/maleon17/codex-ask)** is installed on the same host, the two sides connect on their own:
+
+- **Telegram actions from the bridge.** A person who is the registered owner of a userbot instance gets that instance's Telegram tools in their bridge chat — send a message, read a chat's history, manage groups and triggers — executed in their own Telegram account through their userbot. Which instance belongs to whom is decided by the relay's owners map, not by the model: someone who owns no instance gets no tools, and nobody gets another person's. Because these calls do not come from a Telegram chat, every tool needs its target named explicitly.
+- **Tasks from Jarvis to the bridge.** The userbot assistant can hand a task to this bridge (`delegate_to_bridge`) and get the answer back. Only the instance's owner can trigger that, in their own request; trigger-fired runs and other people's requests are refused by the relay.
+
+A change in who owns which instance is picked up when the bridge restarts.
 
 ## Tests
 
@@ -154,7 +163,7 @@ The peer is found automatically when it is cloned next to this repository (as `c
 scripts/run_tests.sh
 ```
 
-The suite byte-compiles modules and runs `breaker_tests/test_*.py`. Optional sibling-repository integration checks look for `~/claude-jarvis` and `~/codex-jarvis` (override with `CLAUDE_JARVIS_DIR` and `CODEX_JARVIS_DIR`) and report `SKIP` when those checkouts are absent.
+The suite byte-compiles modules and runs `breaker_tests/test_*.py`. Optional cross-repository checks look for `~/telegram-ai-core`, `~/claude-jarvis` and `~/codex-jarvis` (override with `TELEGRAM_AI_CORE_DIR`, `CLAUDE_JARVIS_DIR` and `CODEX_JARVIS_DIR`) and report `SKIP` when those checkouts are absent.
 
 ## Troubleshooting
 

@@ -27,6 +27,7 @@ from collections import deque
 from strings import current_language, t
 
 from runtime import (
+    EXTERNAL_RESULT_DIR,
     EXTERNAL_REQUEST_DIR, EXTERNAL_REQUEST_FILE, FILE_SEND_MAX_CAPTION_CHARS,
     FILE_SEND_QUEUE_DIR,
     FILE_SEND_RESULT_DIR, LOCAL_BOT_API, MAX_DOCUMENT_BYTES, OWNER_ID, RESTART_SIGNAL_FILE,
@@ -420,7 +421,7 @@ def _external_request_watcher_loop(state):
                     print(f"Could not write external request result {request_id}: {result_exc}", flush=True)
 
 
-def _write_cross_delegate_result(request_id, ok, text):
+def _write_cross_delegate_result(request_id, ok, text, final=None):
     os.makedirs(CROSS_DELEGATE_RESULT_DIR, mode=0o700, exist_ok=True)
     result_path = os.path.join(CROSS_DELEGATE_RESULT_DIR, f"{request_id}.json")
     fd, temporary = tempfile.mkstemp(
@@ -428,11 +429,13 @@ def _write_cross_delegate_result(request_id, ok, text):
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(
-                {"done": True, "ok": bool(ok), "text": text},
-                handle,
-                ensure_ascii=False,
-            )
+            result = {"done": True, "ok": bool(ok), "text": text}
+            if final:
+                # Where the delegated turn's final answer will appear, so the
+                # delegating agent can wait for it instead of only learning
+                # that the task was accepted.
+                result["final"] = final
+            json.dump(result, handle, ensure_ascii=False)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -472,6 +475,7 @@ def _cross_delegate_watcher_loop(state):
                 pass
 
             ok = False
+            accepted_at = time.time()
             if not isinstance(request, dict):
                 result_text = t('bridge_cross_delegate_watcher_loop_1')
             else:
@@ -492,7 +496,9 @@ def _cross_delegate_watcher_loop(state):
                         t('bridge_cross_delegate_watcher_loop_4')
                     )
                 else:
-                    ok = start_delegate_turn(chat_id, text, state)
+                    # The request id doubles as the result id: the turn's
+                    # final answer is written for exactly this request.
+                    ok = start_delegate_turn(chat_id, text, state, request_id=request_id)
                     if ok:
                         result_text = (
                             t('bridge_cross_delegate_watcher_loop_5')
@@ -501,8 +507,19 @@ def _cross_delegate_watcher_loop(state):
                         result_text = (
                             t('bridge_cross_delegate_watcher_loop_6')
                         )
+            final_path = os.path.join(EXTERNAL_RESULT_DIR, f"{request_id}.json")
+            final = (
+                {"path": final_path, "after_ts": accepted_at, "consume": True} if ok else None
+            )
+            if not ok:
+                # A refusal is reported in the acceptance result itself; do not
+                # leave a second copy behind in the per-request result store.
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
             try:
-                _write_cross_delegate_result(request_id, ok, result_text)
+                _write_cross_delegate_result(request_id, ok, result_text, final)
             except Exception as exc:
                 print(
                     f"Could not write cross-delegate result {request_id}: {exc}",

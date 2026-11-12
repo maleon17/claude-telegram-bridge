@@ -113,13 +113,13 @@ def test_present_peer():
 
     worker = threading.Thread(target=accepting_peer)
     worker.start()
-    ok, text = delegate._delegate_request("real task")
+    ok, text = delegate._delegate_request("real task", 0)
     worker.join()
     assert ok and text == "accepted", text
 
     # Peer installed but not running: the request is withdrawn, and says so.
     delegate.POLL_TIMEOUT_S = 0.6
-    ok, text = delegate._delegate_request("nobody home")
+    ok, text = delegate._delegate_request("nobody home", 0)
     assert not ok and "НЕ начата" in text, text
     assert not [n for n in os.listdir(queue) if n.endswith(".json")]
 
@@ -135,13 +135,88 @@ def test_present_peer():
 
     worker = threading.Thread(target=claiming_peer)
     worker.start()
-    ok, text = delegate._delegate_request("claimed")
+    ok, text = delegate._delegate_request("claimed", 0)
     worker.join()
     assert not ok and "забрал запрос" in text and "НЕ начата" not in text, text
+
+
+def test_final_answer_comes_back_to_the_delegating_agent():
+    peer = _make_peer("codex-telegram-bridge-final")
+    os.environ["CODEX_TELEGRAM_BRIDGE_DIR"] = peer
+    queue = os.path.join(peer, "cross_delegate_queue")
+    results = os.path.join(peer, "cross_delegate_result")
+    final_path = os.path.join(peer, "final.json")
+    delegate.POLL_TIMEOUT_S = 5
+    delegate.FINAL_POLL_INTERVAL_S = 0.05
+
+    def peer_with(final_payload, delay=0.3, stale=None):
+        """Accepts the request, then publishes (or not) the turn's final answer."""
+        def run():
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                names = [n for n in os.listdir(queue) if n.endswith(".json")] if os.path.isdir(queue) else []
+                if names:
+                    os.remove(os.path.join(queue, names[0]))
+                    if stale is not None:
+                        with open(final_path, "w", encoding="utf-8") as handle:
+                            json.dump(stale, handle)
+                    with open(os.path.join(results, names[0]), "w", encoding="utf-8") as handle:
+                        json.dump({
+                            "done": True, "ok": True, "text": "accepted",
+                            "final": {"path": final_path, "after_ts": time.time(), "consume": True},
+                        }, handle)
+                    if final_payload is not None:
+                        time.sleep(delay)
+                        payload = dict(final_payload, ts=time.time())
+                        with open(final_path + ".tmp", "w", encoding="utf-8") as handle:
+                            json.dump(payload, handle)
+                        os.replace(final_path + ".tmp", final_path)
+                    return
+                time.sleep(0.02)
+        thread = threading.Thread(target=run)
+        thread.start()
+        return thread
+
+    worker = peer_with({"text": "42 is the answer", "ok": True})
+    ok, text = delegate._delegate_request("compute", 5)
+    worker.join()
+    assert ok and text.endswith("42 is the answer") and text.startswith("Ответ Codex"), text
+    assert not os.path.exists(final_path), "a per-request result must be collected"
+
+    worker = peer_with({"text": "boom", "ok": False})
+    ok, text = delegate._delegate_request("compute", 5)
+    worker.join()
+    assert not ok and "boom" in text and "ошибкой" in text, text
+
+    # An answer left over from an earlier turn is not this request's answer,
+    # and a task that outlives the wait is reported as still running.
+    worker = peer_with(None, stale={"text": "OLD ANSWER", "ok": True, "ts": time.time() - 3600})
+    ok, text = delegate._delegate_request("slow", 0.4)
+    worker.join()
+    assert ok and "OLD ANSWER" not in text and "не завершилась" in text, text
+    os.remove(final_path)
+
+    # A peer that predates this feature sends no "final": still accepted.
+    def old_peer():
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            names = [n for n in os.listdir(queue) if n.endswith(".json")]
+            if names:
+                os.remove(os.path.join(queue, names[0]))
+                with open(os.path.join(results, names[0]), "w", encoding="utf-8") as handle:
+                    json.dump({"done": True, "ok": True, "text": "accepted"}, handle)
+                return
+            time.sleep(0.02)
+    worker = threading.Thread(target=old_peer)
+    worker.start()
+    ok, text = delegate._delegate_request("compat", 5)
+    worker.join()
+    assert ok and text.startswith("accepted"), text
 
 
 if __name__ == "__main__":
     test_absent_peer()
     test_stray_directory_is_not_a_peer()
     test_present_peer()
+    test_final_answer_comes_back_to_the_delegating_agent()
     print("CLOSED: delegate-to-codex is offered only with a real Codex bridge and reports its state truthfully.")

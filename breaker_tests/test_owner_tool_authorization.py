@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _load_claude_ask import load_real_claude_ask_module, make_bare_instance
 
 
-OWNER_ID = 8480261623
-TEST_BOT_ID = 8747608932
+OWNER_ID = 1000000001
+TEST_BOT_ID = 2000000002
 
 
 class FakeClient:
@@ -31,7 +31,7 @@ async def run_tool(mod, requester_id, chat_id="123"):
     instance._contact_action = contact_action
     instance._fetch_pending_tool_call = lambda: {
         "request_id": "test-request",
-        "instance_id": "andrey",
+        "instance_id": "test-instance",
         "chat_id": str(chat_id),
         "tool": "block_user",
         "args": {"target": "@target"},
@@ -49,18 +49,18 @@ def main():
     assert results[0][1].startswith(mod.INTERNAL_TOOL_RESULT_PREFIX)
     assert "Действие НЕ выполнено" in results[0][1]
 
-    calls, results = asyncio.run(
-        run_tool(mod, requester_id=TEST_BOT_ID, chat_id=OWNER_ID)
-    )
-    assert calls == [("block_user", "@target")]
-    assert results == [("test-request", "executed")]
-
-    calls, results = asyncio.run(
-        run_tool(mod, requester_id=TEST_BOT_ID, chat_id="456")
-    )
-    assert calls == [], "test channel escaped the owner's private chat"
-    assert results[0][1].startswith(mod.INTERNAL_TOOL_RESULT_PREFIX)
-    assert "Действие НЕ выполнено" in results[0][1]
+    # A bot id is never privileged at the action gate, even when it is the
+    # configured test channel: its requests are attributed to the owner only
+    # where they are enqueued, and only from its own private chat.
+    mod.TEST_CHANNEL_BOT_ID = TEST_BOT_ID
+    for chat_id in (OWNER_ID, TEST_BOT_ID, "456"):
+        calls, results = asyncio.run(
+            run_tool(mod, requester_id=TEST_BOT_ID, chat_id=chat_id)
+        )
+        assert calls == [], "a bare bot id reached a Telegram action"
+        assert results[0][1].startswith(mod.INTERNAL_TOOL_RESULT_PREFIX)
+        assert "Действие НЕ выполнено" in results[0][1]
+    mod.TEST_CHANNEL_BOT_ID = 0
 
     calls, results = asyncio.run(run_tool(mod, requester_id=OWNER_ID))
     assert calls == [("block_user", "@target")]

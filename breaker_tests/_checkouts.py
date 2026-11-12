@@ -2,7 +2,7 @@
 
 These tests deliberately load the *canonical* checkouts the live services run
 from, not historical copies. Override the locations with CLAUDE_JARVIS_DIR /
-CODEX_JARVIS_DIR; when a checkout is absent the test is skipped explicitly
+CODEX_JARVIS_DIR / TELEGRAM_AI_CORE_DIR; when a checkout is absent the test is skipped explicitly
 instead of failing with an ImportError.
 """
 import os
@@ -15,6 +15,8 @@ def checkout(env_var, default):
 
 CLAUDE_JARVIS_DIR = checkout("CLAUDE_JARVIS_DIR", "~/claude-jarvis")
 CODEX_JARVIS_DIR = checkout("CODEX_JARVIS_DIR", "~/codex-jarvis")
+# The relay and the userbot module source live in telegram-ai-core.
+TELEGRAM_AI_CORE_DIR = checkout("TELEGRAM_AI_CORE_DIR", "~/telegram-ai-core")
 
 
 def require(*paths):

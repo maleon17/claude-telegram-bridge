@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from strings import t
 from telegram_format import format_message, strip_mdv2, escape_mdv2
 from delegate_to_codex_mcp import codex_bridge_dir
+from telegram_actions_link import SERVER_NAME as TELEGRAM_ACTIONS_SERVER, resolve_binding
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OWNER_ID = os.environ["OWNER_ID"]
@@ -350,7 +351,13 @@ def default_claude_config_dir():
     )
 
 
-def _ensure_tenant_mcp_config(config_dir):
+# Chats whose Telegram-action binding was already worked out by this process
+# (it involves the relay's CLI, too slow to repeat on every turn). A change
+# in who owns which instance is picked up on the next bridge restart.
+_telegram_actions_checked = set()
+
+
+def _ensure_tenant_mcp_config(config_dir, chat_id=None):
     config_path = os.path.join(config_dir, ".claude.json")
     if os.path.exists(config_path):
         with open(config_path, encoding="utf-8") as handle:
@@ -400,6 +407,24 @@ def _ensure_tenant_mcp_config(config_dir):
             "env": server_env,
         }
         changed = True
+    if chat_id is not None and str(chat_id) not in _telegram_actions_checked:
+        _telegram_actions_checked.add(str(chat_id))
+        # The owner of a userbot instance gets that instance's Telegram
+        # actions here; which instance (if any) is the relay's call.
+        current = servers.get(TELEGRAM_ACTIONS_SERVER)
+        ours = isinstance(current, dict) and (current.get("env") or {}).get("JARVIS_RELAY_DIRECT") == "1"
+        binding = resolve_binding(chat_id, config_dir, "claude-ask")
+        if binding:
+            entry = {
+                "type": "stdio", "command": binding["command"],
+                "args": binding["args"], "env": binding["env"],
+            }
+            if (ours or current is None) and current != entry:
+                servers[TELEGRAM_ACTIONS_SERVER] = entry
+                changed = True
+        elif ours:
+            del servers[TELEGRAM_ACTIONS_SERVER]
+            changed = True
     if not changed:
         return
     temporary = f"{config_path}.{uuid.uuid4().hex}.tmp"
@@ -485,7 +510,7 @@ def account_dir(chat_id, state_key=None):
             _write_default_persona_marker(d, handle.read())
     if not owner:
         _ensure_tenant_workspace_rules(d, claude_md)
-    _ensure_tenant_mcp_config(d)
+    _ensure_tenant_mcp_config(d, chat_id)
     return d
 
 

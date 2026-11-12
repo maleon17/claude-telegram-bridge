@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _load_claude_ask import load_real_claude_ask_module, make_bare_instance
 
 
-OWNER_ID = 8480261623
-TEST_BOT_ID = 8747608932
+OWNER_ID = 1000000001
+TEST_BOT_ID = 2000000002
 
 
 class FakeClient:
@@ -36,7 +36,7 @@ async def _run_tool(mod, requester_id, chat_id="123"):
     instance._contact_action = contact_action
     instance._fetch_pending_tool_call = lambda: {
         "request_id": "regression-request",
-        "instance_id": "andrey",
+        "instance_id": "test-instance",
         "chat_id": str(chat_id),
         "tool": "block_user",
         "args": {"target": "@target"},
@@ -56,16 +56,25 @@ def main():
     assert calls == [], "non-owner request reached a Telegram action"
     assert results[0][1].startswith(mod.INTERNAL_TOOL_RESULT_PREFIX)
     assert "Действие НЕ выполнено" in results[0][1]
-    print("[1/2] non-owner Telegram action was denied before handler execution")
+    print("[1/3] non-owner Telegram action was denied before handler execution")
 
+    # The test channel has no standing of its own at the action gate: its id
+    # as a requester is denied like any other non-owner, configured or not.
+    mod.TEST_CHANNEL_BOT_ID = TEST_BOT_ID
     calls, results = asyncio.run(
         _run_tool(mod, requester_id=TEST_BOT_ID, chat_id=OWNER_ID)
     )
+    mod.TEST_CHANNEL_BOT_ID = 0
+    assert calls == [], "a bare bot id reached a Telegram action"
+    assert "Действие НЕ выполнено" in results[0][1]
+    print("[2/3] a bot id as requester is denied, even for the configured test channel")
+
+    calls, results = asyncio.run(_run_tool(mod, requester_id=OWNER_ID))
     assert calls == [("block_user", "@target")]
     assert results == [("regression-request", "executed")]
-    print("[2/2] dedicated test channel reached the handler in owner's DM")
+    print("[3/3] the owner reaches the handler")
 
-    print("\nCLOSED: Telegram action dispatch is owner-only plus the scoped test channel.")
+    print("\nCLOSED: Telegram action dispatch is owner-only.")
 
 
 if __name__ == "__main__":
