@@ -265,6 +265,7 @@ def _new_turn_accumulator(state, chat_id):
         "written_files": [],
         "compact_outcome": None,
         "compact_done_event": None,
+        "delivered": False,
         # Draft rendering state, two levels:
         # - draft_thought: the current "thinking"/text block, plain (no
         #   code formatting). Stays as an anchor across however many tool
@@ -306,6 +307,8 @@ def _flush_draft(chat_id, ts, force=False):
     text = f"🤔 {body}"
 
     with ts["progress_lock"]:
+        if ts["delivered"]:
+            return
         now = time.time()
         if (
             ts["progress_msg_id"] is not None
@@ -369,6 +372,12 @@ def _deliver_turn_result(
     _chat_reader_loop, not from whoever originally called dispatch_turn."""
     telegram_chat_id = chat_id if output_chat_id is None else output_chat_id
     _set_chat_language(state, telegram_chat_id)
+    # Late draft refreshes (compaction watchdog, stream deltas) must not
+    # overwrite the progress message once it becomes the final answer.
+    with ts["progress_lock"]:
+        ts["delivered"] = True
+    if ts["compact_done_event"]:
+        ts["compact_done_event"].set()
     log_lines = ts["log_lines"]
     final_text = ts["final_text"]
 
@@ -427,6 +436,10 @@ def _deliver_turn_result(
         # no exception or stderr output anywhere). "по /stop" would lie in
         # every case except the first, so keep the wording cause-agnostic.
         text_out = t('chat_process_deliver_turn_result_3')
+    elif final_text is not None and final_text.strip():
+        # An automatic compaction in the middle of a normal turn also sets
+        # compact_outcome; the model's actual answer must win over it.
+        text_out = final_text
     elif ts.get("compact_outcome"):
         text_out = ts["compact_outcome"]
     else:
