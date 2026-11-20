@@ -6,7 +6,14 @@ import sys
 from pathlib import Path
 
 
-BOT_ROOT = Path.home() / "codex-telegram-bot"
+_BOT_ROOT_CANDIDATES = (
+    Path.home() / ".codex-telegram-bot",
+    Path.home() / "codex-telegram-bot",
+)
+BOT_ROOT = next(
+    (path for path in _BOT_ROOT_CANDIDATES if (path / "bot.py").is_file()),
+    _BOT_ROOT_CANDIDATES[0],
+)
 BOT_ENTRYPOINT = BOT_ROOT / "bot.py"
 os.environ["CODEX_BOT_STATE_FILE"] = str(BOT_ROOT / "state.json")
 os.execv(sys.executable, [sys.executable, str(BOT_ENTRYPOINT), *sys.argv[1:]])

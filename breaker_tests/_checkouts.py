@@ -9,12 +9,16 @@ import os
 import sys
 
 
-def checkout(env_var, default):
-    return os.path.abspath(os.path.expanduser(os.environ.get(env_var, default)))
+def checkout(env_var, *defaults):
+    """The env override if set, else the first default that exists."""
+    if env_var in os.environ:
+        return os.path.abspath(os.path.expanduser(os.environ[env_var]))
+    paths = [os.path.abspath(os.path.expanduser(default)) for default in defaults]
+    return next((path for path in paths if os.path.isdir(path)), paths[0])
 
 
-CLAUDE_JARVIS_DIR = checkout("CLAUDE_JARVIS_DIR", "~/claude-jarvis")
-CODEX_JARVIS_DIR = checkout("CODEX_JARVIS_DIR", "~/codex-jarvis")
+CLAUDE_JARVIS_DIR = checkout("CLAUDE_JARVIS_DIR", "~/claude-jarvis", "~/.claude-jarvis")
+CODEX_JARVIS_DIR = checkout("CODEX_JARVIS_DIR", "~/codex-jarvis", "~/.codex-jarvis")
 # The relay and the userbot module source live in telegram-ai-core.
 TELEGRAM_AI_CORE_DIR = checkout("TELEGRAM_AI_CORE_DIR", "~/telegram-ai-core")
 
