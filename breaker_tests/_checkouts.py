@@ -17,10 +17,10 @@ def checkout(env_var, *defaults):
     return next((path for path in paths if os.path.isdir(path)), paths[0])
 
 
-CLAUDE_JARVIS_DIR = checkout("CLAUDE_JARVIS_DIR", "~/claude-jarvis", "~/.claude-jarvis")
-CODEX_JARVIS_DIR = checkout("CODEX_JARVIS_DIR", "~/codex-jarvis", "~/.codex-jarvis")
+CLAUDE_JARVIS_DIR = checkout("CLAUDE_JARVIS_DIR", "~/.claude-ask", "~/claude-ask", "~/.claude-jarvis", "~/claude-jarvis")
+CODEX_JARVIS_DIR = checkout("CODEX_JARVIS_DIR", "~/.codex-ask", "~/codex-ask", "~/.codex-jarvis", "~/codex-jarvis")
 # The relay and the userbot module source live in telegram-ai-core.
-TELEGRAM_AI_CORE_DIR = checkout("TELEGRAM_AI_CORE_DIR", "~/telegram-ai-core", "~/.telegram-ai-core")
+TELEGRAM_AI_CORE_DIR = checkout("TELEGRAM_AI_CORE_DIR", "~/.telegram-ai-core", "~/telegram-ai-core")
 
 
 def require(*paths):

@@ -39,8 +39,8 @@ Each chat keeps one long-lived Claude Code process, so a conversation is a real,
 **1. Install the bot:**
 
 ```bash
-git clone https://github.com/maleon17/claude-telegram-bridge.git
-cd claude-telegram-bridge
+git clone https://github.com/maleon17/claude-telegram-bridge.git ~/.claude-telegram-bridge
+cd ~/.claude-telegram-bridge
 ./setup.sh
 ```
 
@@ -166,7 +166,7 @@ Optional `bridge.env` keys: `TELEGRAM_API_URL` (local Bot API), `BRIDGE_WORKDIR`
 
 Unattended install: every `setup.sh` question can be answered through the environment — `BOT_TOKEN`, `OWNER_ID`, `SERVICE_NAME`, `LOCAL_BOT_API_SETUP=y|n`, `INSTALL_VOICE=y|n`, `ASSUME_YES=1`.
 
-The test suite runs extra cross-project checks when `~/telegram-ai-core`, `~/claude-jarvis` and `~/codex-jarvis` (or the same names with a leading dot) exist (override with `TELEGRAM_AI_CORE_DIR`, `CLAUDE_JARVIS_DIR`, `CODEX_JARVIS_DIR`) and skips them otherwise.
+The test suite runs extra cross-project checks when `~/.telegram-ai-core`, `~/.claude-ask` and `~/.codex-ask` exist (the same names without the leading dot also work) (override with `TELEGRAM_AI_CORE_DIR`, `CLAUDE_JARVIS_DIR`, `CODEX_JARVIS_DIR`) and skips them otherwise.
 
 </details>
 

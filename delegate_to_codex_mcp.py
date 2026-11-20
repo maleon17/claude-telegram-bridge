@@ -11,7 +11,7 @@ from pathlib import Path
 
 # Directory names the peer bridge is cloned under: the GitHub repository name
 # first, then the historical local name.
-PEER_DIR_NAMES = ('codex-telegram-bridge', 'codex-telegram-bot')
+PEER_DIR_NAMES = ('codex-telegram-bridge', '.codex-telegram-bridge', 'codex-telegram-bot', '.codex-telegram-bot')
 PEER_MARKER_FILES = ('bot.py', 'delegate_to_claude_mcp.py')
 
 
