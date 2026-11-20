@@ -20,7 +20,7 @@ def checkout(env_var, *defaults):
 CLAUDE_JARVIS_DIR = checkout("CLAUDE_JARVIS_DIR", "~/claude-jarvis", "~/.claude-jarvis")
 CODEX_JARVIS_DIR = checkout("CODEX_JARVIS_DIR", "~/codex-jarvis", "~/.codex-jarvis")
 # The relay and the userbot module source live in telegram-ai-core.
-TELEGRAM_AI_CORE_DIR = checkout("TELEGRAM_AI_CORE_DIR", "~/telegram-ai-core")
+TELEGRAM_AI_CORE_DIR = checkout("TELEGRAM_AI_CORE_DIR", "~/telegram-ai-core", "~/.telegram-ai-core")
 
 
 def require(*paths):
