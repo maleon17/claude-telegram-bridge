@@ -26,6 +26,25 @@ from telegram_api import (
 )
 from telegram_format import escape_mdv2, fenced_code, mdv2_fenced_code, strip_mdv2
 
+# The CLI's own sign-in failures tell the reader to run `claude auth login`
+# (or /login) in a terminal. In Telegram the way back is the bridge's /login.
+_AUTH_FAILURE_RE = re.compile(
+    r"failed to authenticate|authentication_error|oauth token (?:has )?expired"
+    r"|not logged in|please run /login|claude auth login|claude setup-token",
+    re.IGNORECASE,
+)
+
+
+def is_auth_failure(event):
+    """True for a turn's "result" event that only reports a sign-in failure."""
+    text = str(event.get("result") or "").strip()
+    if not text or len(text) > 1000:
+        return False
+    if not (event.get("is_error") or text.lower().startswith("failed to authenticate")):
+        return False
+    return bool(_AUTH_FAILURE_RE.search(text))
+
+
 def tool_call_line(name, tool_input):
     if name == "Bash":
         cmd = tool_input.get("command", "")[:500]
@@ -262,6 +281,7 @@ def _new_turn_accumulator(state, chat_id):
         "last_text_log_index": None,
         "last_text_log_raw": None,
         "denials": [],
+        "auth_failed": False,
         "written_files": [],
         "compact_outcome": None,
         "compact_done_event": None,
@@ -436,6 +456,9 @@ def _deliver_turn_result(
         # no exception or stderr output anywhere). "по /stop" would lie in
         # every case except the first, so keep the wording cause-agnostic.
         text_out = t('chat_process_deliver_turn_result_3')
+    elif ts.get("auth_failed"):
+        # Not the CLI's terminal advice: the owner signs in from Telegram.
+        text_out = t('chat_process_login_expired', value0="/login delegate" if delegated else "/login")
     elif final_text is not None and final_text.strip():
         # An automatic compaction in the middle of a normal turn also sets
         # compact_outcome; the model's actual answer must win over it.
@@ -459,7 +482,8 @@ def _deliver_turn_result(
             send_rich(telegram_chat_id, process_rich_text)
 
     final_payload = text_out or t('chat_process_deliver_turn_result_5')
-    if not stopped:
+    if not stopped and not ts.get("auth_failed"):
+        # A sign-in failure used no tokens; an all-zero footer is just noise.
         footer = _format_turn_footer(
             state, chat_id, ts, preserve_current_session=delegated,
         )
@@ -764,6 +788,7 @@ def _chat_reader_loop(chat_id, state, record):
             if event_type == "result":
                 ts["current_session_id"] = d.get("session_id") or ts["current_session_id"]
                 ts["final_text"] = d.get("result", "")
+                ts["auth_failed"] = is_auth_failure(d)
                 ts["last_usage"] = d.get("usage") or {}
                 ts["denials"].extend(d.get("permission_denials") or [])
                 add_usage(
