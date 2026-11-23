@@ -1503,6 +1503,27 @@ def _login_credentials_ready(info):
         return False
 
 
+# On a terminal (the `script` pty below) Claude Code prints the sign-in link
+# as an OSC 8 hyperlink: ESC ] 8 ;; <url> ESC \ <text> ESC ] 8 ;; ESC \. A
+# plain https://\S+ match then swallows the escape sequence and the link text
+# as well, and the doubled query makes claude.com refuse the sign-in.
+_OSC8_LINK_RE = re.compile(r"\x1b\]8;[^;\x07\x1b]*;(https://[^\x07\x1b]+)")
+_TERMINAL_ESCAPE_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC ... BEL / ST
+    r"|\x1b\[[0-9;?]*[ -/]*[@-~]"            # CSI sequences
+    r"|\x1b[@-_]"                            # other two-byte escapes
+)
+
+
+def _login_url(line):
+    """The sign-in URL in one line of `claude auth login` output, or None."""
+    linked = _OSC8_LINK_RE.search(line)
+    if linked:
+        return linked.group(1)
+    plain = re.search(r"https://[^\s\x07\x1b]+", _TERMINAL_ESCAPE_RE.sub("", line))
+    return plain.group(0) if plain else None
+
+
 def start_login(chat_id, state, delegated=False):
     """Start Claude's interactive OAuth flow and relay it through Telegram.
 
@@ -1547,10 +1568,20 @@ def start_login(chat_id, state, delegated=False):
         _set_chat_language(state, chat_id)
         deadline = time.time() + LOGIN_TIMEOUT_S
         url_seen = False
+
+        def give_up():
+            # Reading stdout blocks until a line arrives, so the deadline
+            # below alone never fires when the CLI prints nothing at all.
+            if not url_seen and proc.poll() is None:
+                proc.terminate()
+
+        watchdog = threading.Timer(LOGIN_TIMEOUT_S, give_up)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             for line in proc.stdout:
-                m = re.search(r"https://\S+", line.strip())
-                if m:
+                url = _login_url(line)
+                if url:
                     url_seen = True
                     send_message(
                         chat_id,
@@ -1562,7 +1593,7 @@ def start_login(chat_id, state, delegated=False):
                         "chat_id": chat_id,
                         "text": t('handlers_reader_2'),
                         "reply_markup": {
-                            "inline_keyboard": [[{"text": t('handlers_reader_2'), "url": m.group(0)}]]
+                            "inline_keyboard": [[{"text": t('handlers_reader_2'), "url": url}]]
                         },
                     })
                     break
@@ -1570,6 +1601,8 @@ def start_login(chat_id, state, delegated=False):
                     break
         except Exception:
             pass
+        finally:
+            watchdog.cancel()
         if not url_seen and pending_logins.get(chat_id) is info:
             set_account_status(state, target_key, "login_failed")
             _cleanup_login(chat_id, info)

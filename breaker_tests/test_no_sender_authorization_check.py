@@ -55,7 +55,7 @@ def main():
     calls, results = asyncio.run(_run_tool(mod, requester_id=111))
     assert calls == [], "non-owner request reached a Telegram action"
     assert results[0][1].startswith(mod.INTERNAL_TOOL_RESULT_PREFIX)
-    assert "Действие НЕ выполнено" in results[0][1]
+    assert mod._t("tool_denied") in results[0][1]
     print("[1/3] non-owner Telegram action was denied before handler execution")
 
     # The test channel has no standing of its own at the action gate: its id
@@ -66,7 +66,7 @@ def main():
     )
     mod.TEST_CHANNEL_BOT_ID = 0
     assert calls == [], "a bare bot id reached a Telegram action"
-    assert "Действие НЕ выполнено" in results[0][1]
+    assert mod._t("tool_denied") in results[0][1]
     print("[2/3] a bot id as requester is denied, even for the configured test channel")
 
     calls, results = asyncio.run(_run_tool(mod, requester_id=OWNER_ID))

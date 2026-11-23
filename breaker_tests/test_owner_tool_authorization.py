@@ -47,7 +47,7 @@ def main():
     calls, results = asyncio.run(run_tool(mod, requester_id=111))
     assert calls == [], "non-owner request reached a Telegram action"
     assert results[0][1].startswith(mod.INTERNAL_TOOL_RESULT_PREFIX)
-    assert "Действие НЕ выполнено" in results[0][1]
+    assert mod._t("tool_denied") in results[0][1]
 
     # A bot id is never privileged at the action gate, even when it is the
     # configured test channel: its requests are attributed to the owner only
@@ -59,7 +59,7 @@ def main():
         )
         assert calls == [], "a bare bot id reached a Telegram action"
         assert results[0][1].startswith(mod.INTERNAL_TOOL_RESULT_PREFIX)
-        assert "Действие НЕ выполнено" in results[0][1]
+        assert mod._t("tool_denied") in results[0][1]
     mod.TEST_CHANNEL_BOT_ID = 0
 
     calls, results = asyncio.run(run_tool(mod, requester_id=OWNER_ID))
