@@ -3,6 +3,7 @@ import glob
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -18,11 +19,12 @@ from runtime import (
     ACCOUNTS_DIR, BATCH_DEBOUNCE_S, CLAUDE_BIN, MAX_MSG_LEN, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir,
     batch_timers, busy_chats, claude_env, draining, intake_active, intake_queues, intake_lock, load_whitelist,
     pending_batch_generations, pending_batches, pending_batches_lock, pending_logins,
-    _write_default_persona_marker,
+    _write_default_persona_marker, TenantUnavailable, ensure_tenant,
+    tenant_identity, tenant_isolated, tenant_run_argv, tenant_tool_json,
 )
 from state_store import (
     _set_chat_language, clear_pending_prompt, clear_session, delegate_key, fetch_account_limits,
-    get_account_status, get_delegate_resume_selected, get_effort, get_language, get_model, get_pending_prompt, get_permission_mode,
+    forget_isolated_ready, get_account_status, get_delegate_resume_selected, get_effort, get_language, get_model, get_pending_prompt, get_permission_mode,
     get_session, get_usage, get_voice_language, get_workspace, list_sessions, pop_delegate_request_id,
     projects_dir_for,
     request_restart, session_message_count, set_account_status, set_effort, set_model,
@@ -741,10 +743,21 @@ def handle_command(chat_id, text, state, offset=None):
         spawn_turn(chat_id, "/compact", state)
         return True
 
-    pdir = projects_dir_for(account_dir(chat_id), get_workspace(state, chat_id))
+    isolated = tenant_isolated(chat_id)
+    pdir = None if isolated else projects_dir_for(account_dir(chat_id), get_workspace(state, chat_id))
 
     if cmd == "sessions":
-        sessions = list_sessions(pdir)
+        if isolated:
+            try:
+                sessions = [(item["id"], item["mtime"], item["preview"])
+                            for item in tenant_tool_json(chat_id, "main", "list-sessions",
+                                                         cwd=get_workspace(state, chat_id))["sessions"][:10]]
+            except TenantUnavailable as exc:
+                print(f"Tenant unavailable: {exc}", flush=True)
+                send_message(chat_id, t('tenant_unavailable'))
+                return True
+        else:
+            sessions = list_sessions(pdir)
         if not sessions:
             send_message(chat_id, t('handlers_handle_command_5'))
             return True
@@ -769,7 +782,7 @@ def handle_command(chat_id, text, state, offset=None):
             send_message(chat_id, t('handlers_handle_command_9', value0=arg))
             return True
         delegate_process = delegate_key(chat_id)
-        delegate_pdir = projects_dir_for(
+        delegate_pdir = None if isolated else projects_dir_for(
             account_dir(chat_id, state_key=delegate_process),
             get_workspace(state, delegate_process),
         )
@@ -786,8 +799,23 @@ def handle_command(chat_id, text, state, offset=None):
             exact = [sid for sid in session_ids if sid.lower() == wanted]
             return exact or [sid for sid in session_ids if sid.lower().startswith(wanted)]
 
-        matches = [(chat_id, sid) for sid in matching_sessions(pdir)]
-        matches += [(delegate_process, sid) for sid in matching_sessions(delegate_pdir)]
+        if isolated:
+            try:
+                main = tenant_tool_json(chat_id, "main", "list-sessions",
+                                        cwd=get_workspace(state, chat_id))["sessions"]
+                # Delegate processes are an owner feature: do not provision a delegate user for other tenants.
+                delegate = (tenant_tool_json(chat_id, "delegate", "list-sessions",
+                                             cwd=get_workspace(state, delegate_process))["sessions"]
+                            if str(chat_id) == str(OWNER_ID) else [])
+                matches = [(chat_id, item["id"]) for item in main if item["id"].lower().startswith(wanted)]
+                matches += [(delegate_process, item["id"]) for item in delegate if item["id"].lower().startswith(wanted)]
+            except TenantUnavailable as exc:
+                print(f"Tenant unavailable: {exc}", flush=True)
+                send_message(chat_id, t('tenant_unavailable'))
+                return True
+        else:
+            matches = [(chat_id, sid) for sid in matching_sessions(pdir)]
+            matches += [(delegate_process, sid) for sid in matching_sessions(delegate_pdir)]
         if not matches:
             send_message(chat_id, t('handlers_handle_command_9', value0=arg))
             return True
@@ -811,7 +839,17 @@ def handle_command(chat_id, text, state, offset=None):
     if cmd == "usage":
         session_id = get_session(state, chat_id)
         u = get_usage(state, chat_id, session_id)
-        msg_count = session_message_count(session_id, pdir)
+        if isolated and session_id:
+            try:
+                entries = tenant_tool_json(chat_id, "main", "list-sessions",
+                                           cwd=get_workspace(state, chat_id))["sessions"]
+                msg_count = next((item.get("messages") for item in entries if item["id"] == session_id), None)
+            except TenantUnavailable as exc:
+                print(f"Tenant unavailable: {exc}", flush=True)
+                send_message(chat_id, t('tenant_unavailable'))
+                return True
+        else:
+            msg_count = session_message_count(session_id, pdir)
         context_tokens = u.get("last_context_tokens")
         model = get_model(state, chat_id) or "default"
         effort = get_effort(state, chat_id)
@@ -846,7 +884,13 @@ def handle_command(chat_id, text, state, offset=None):
                       output=fmt(mu['output_tokens']), cost=mu['cost_usd'])
                 )
 
-        limits = fetch_account_limits(account_dir(chat_id))
+        try:
+            limits = (fetch_account_limits(chat_id=chat_id) if isolated
+                      else fetch_account_limits(account_dir(chat_id)))
+        except TenantUnavailable as exc:
+            print(f"Tenant unavailable: {exc}", flush=True)
+            send_message(chat_id, t('tenant_unavailable'))
+            return True
         lines.append("")
         lines.append(t('usage_limits_header'))
         for ln in limits.splitlines():
@@ -949,7 +993,40 @@ def handle_command(chat_id, text, state, offset=None):
             return True
         if arg.lower() == "default":
             set_workspace(state, chat_id, None)
-            send_message(chat_id, t('handlers_handle_command_28', value0=WORKDIR))
+            send_message(chat_id, t('handlers_handle_command_28', value0="workspace" if isolated else WORKDIR))
+            return True
+        if isolated:
+            try:
+                home = ensure_tenant(chat_id, "main")["home"]
+            except TenantUnavailable as exc:
+                print(f"Tenant unavailable: {exc}", flush=True)
+                send_message(chat_id, t('tenant_unavailable'))
+                return True
+            root = os.path.join(home, "workspace")
+            if ".." in arg.split("/"):
+                send_message(chat_id, t('tenant_workspace_invalid'))
+                return True
+            if os.path.isabs(arg):
+                path = os.path.normpath(arg)
+                if path != root and not path.startswith(root + os.sep):
+                    send_message(chat_id, t('tenant_workspace_invalid'))
+                    return True
+                relative = os.path.relpath(path, home)
+            else:
+                relative = os.path.normpath(arg)
+                if relative != "workspace" and not relative.startswith("workspace" + os.sep):
+                    relative = os.path.normpath(os.path.join("workspace", relative))
+            if relative != "workspace" and not relative.startswith("workspace" + os.sep):
+                send_message(chat_id, t('tenant_workspace_invalid'))
+                return True
+            try:
+                tenant_tool_json(chat_id, "main", "list-sessions", cwd=relative)
+            except TenantUnavailable as exc:
+                print(f"Tenant workspace unavailable: {exc}", flush=True)
+                send_message(chat_id, t('tenant_unavailable'))
+                return True
+            set_workspace(state, chat_id, relative)
+            send_message(chat_id, t('handlers_handle_command_30', value0=relative))
             return True
         path = os.path.abspath(os.path.expanduser(arg))
         if not os.path.isdir(path):
@@ -966,7 +1043,12 @@ def handle_command(chat_id, text, state, offset=None):
         mode = get_permission_mode(state, chat_id) or "bypass"
         workspace = get_workspace(state, chat_id)
         busy = t('handlers_handle_command_31') if chat_id in busy_chats else t('handlers_handle_command_32')
-        acc = get_account_status(state, chat_id) or t('handlers_handle_command_33')
+        try:
+            acc = get_account_status(state, chat_id) or t('handlers_handle_command_33')
+        except TenantUnavailable as exc:
+            print(f"Tenant unavailable: {exc}", flush=True)
+            send_message(chat_id, t('tenant_unavailable'))
+            return True
         lines = [
             t('handlers_handle_command_34'),
             t('handlers_handle_command_35', value0=session_id[:8] if session_id else t('handlers_handle_command_15')),
@@ -987,10 +1069,11 @@ def handle_command(chat_id, text, state, offset=None):
             send_message(chat_id, t('handlers_login_jarvis_owner_only'))
             return True
         if arg == "jarvis":
-            start_login(chat_id, state, jarvis=True)
+            started = start_login(chat_id, state, jarvis=True)
         else:
-            start_login(chat_id, state, delegated=(arg == "delegate"))
-        send_message(chat_id, t('handlers_login_jarvis_started' if arg == "jarvis" else 'handlers_handle_command_41'))
+            started = start_login(chat_id, state, delegated=(arg == "delegate"))
+        if started is not False:
+            send_message(chat_id, t('handlers_login_jarvis_started' if arg == "jarvis" else 'handlers_handle_command_41'))
         return True
 
     if cmd == "restart":
@@ -1122,10 +1205,19 @@ def _run_turn_thread(
             delegated=delegated,
             extra_env=extra_env,
         )
-    except Exception:
+    except TenantUnavailable as exc:
+        print(f"Tenant unavailable: {exc}", flush=True)
+        error_text = t('tenant_unavailable')
+        send_message(output_chat_id or chat_id, error_text)
+        if delegated:
+            write_last_turn(output_chat_id or chat_id, error_text, delegated=True)
+            write_request_result(pop_delegate_request_id(state, chat_id), error_text, ok=False)
+        busy_chats.discard(chat_id)
+    except Exception as exc:
         err = traceback.format_exc()[-1500:]
         print(err, flush=True)
-        error_text = t('bridge_process_message_12', value0=err)
+        error_text = (t('tenant_unavailable') if tenant_isolated(output_chat_id or chat_id)
+                      and isinstance(exc, OSError) else t('bridge_process_message_12', value0=err))
         send_message(output_chat_id or chat_id, error_text)
         if delegated:
             write_last_turn(output_chat_id or chat_id, error_text, delegated=True)
@@ -1214,7 +1306,13 @@ def start_delegate_turn(
         _delegate_error(chat_id, t('handlers_start_delegate_turn_1'), request_id)
         return False
 
-    if get_account_status(state, delegate_process) != "ready":
+    try:
+        delegate_status = get_account_status(state, delegate_process)
+    except TenantUnavailable as exc:
+        print(f"Tenant unavailable: {exc}", flush=True)
+        _delegate_error(chat_id, t('tenant_unavailable'), request_id)
+        return False
+    if delegate_status != "ready":
         _delegate_error(
             chat_id, t('handlers_start_delegate_turn_2'), request_id,
         )
@@ -1433,7 +1531,7 @@ def dispatch_turn(
     effort = get_effort(state, settings_chat_id)
     permission_mode = force_permission_mode or get_permission_mode(state, settings_chat_id)
     workspace = get_workspace(state, settings_chat_id)
-    config_dir = account_dir(
+    config_dir = None if tenant_isolated(telegram_chat_id) else account_dir(
         telegram_chat_id,
         state_key=chat_id if delegated else None,
     )
@@ -1544,15 +1642,26 @@ def start_login(chat_id, state, delegated=False, jarvis=False):
     _set_chat_language(state, chat_id)
     login_key = f"jarvis:{chat_id}" if jarvis else chat_id
     target_key = delegate_key(chat_id) if delegated else chat_id
+    isolated = not jarvis and tenant_isolated(chat_id)
+    if isolated:
+        forget_isolated_ready(chat_id)
+        try:
+            ensure_tenant(chat_id, "delegate" if delegated else "main")
+        except TenantUnavailable as exc:
+            print(f"Tenant unavailable: {exc}", flush=True)
+            send_message(chat_id, t('tenant_unavailable'))
+            return False
     if jarvis:
         override = os.environ.get("JARVIS_CLAUDE_CONFIG_DIR", "")
         config_dir = override if override and os.path.isabs(override) else os.path.expanduser("~/.claude")
+    elif isolated:
+        config_dir = None
     else:
         config_dir = account_dir(chat_id, state_key=target_key)
-    login_dir = (os.path.join(os.path.dirname(__file__), "login") if jarvis
+    login_dir = (os.path.join(os.path.dirname(__file__), "login") if jarvis or isolated
                  else config_dir or os.path.join(os.path.dirname(__file__), "login"))
     os.makedirs(login_dir, mode=0o700, exist_ok=True)
-    if jarvis:
+    if jarvis or isolated:
         os.chmod(login_dir, 0o700)
     fifo_name = f"login_stdin_jarvis_{chat_id}.fifo" if jarvis else f"login_stdin_{chat_id}.fifo"
     fifo_path = os.path.join(login_dir, fifo_name)
@@ -1569,9 +1678,15 @@ def start_login(chat_id, state, delegated=False, jarvis=False):
         os.remove(fifo_path)
     os.mkfifo(fifo_path)
 
-    env = dict(os.environ)
-    env["CLAUDE_CONFIG_DIR"] = config_dir
-    shell_cmd = f'exec script -qefc "{CLAUDE_BIN} auth login --claudeai" /dev/null 0<>{fifo_path}'
+    env = {"PATH": "/usr/bin:/bin"} if isolated else dict(os.environ)
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    if isolated:
+        command = tenant_run_argv(chat_id, "delegate" if delegated else "main",
+                                  command="claude", args=("auth", "login", "--claudeai"))
+        shell_cmd = f"exec script -qefc {shlex.quote(shlex.join(command))} /dev/null 0<>{shlex.quote(fifo_path)}"
+    else:
+        shell_cmd = f'exec script -qefc "{CLAUDE_BIN} auth login --claudeai" /dev/null 0<>{fifo_path}'
     proc = subprocess.Popen(
         ["bash", "-c", shell_cmd],
         env=env,
@@ -1583,6 +1698,7 @@ def start_login(chat_id, state, delegated=False, jarvis=False):
     info = {
         "proc": proc, "fifo": fifo_path, "config_dir": config_dir,
         "state_key": target_key, "delegated": delegated, "started_at": time.time(),
+        "isolated": isolated,
     }
     if jarvis:
         info["jarvis"] = True
@@ -1644,7 +1760,11 @@ def start_login(chat_id, state, delegated=False, jarvis=False):
             if not jarvis:
                 set_account_status(state, target_key, "login_failed")
             _cleanup_login(login_key, info)
-            send_message(chat_id, t('handlers_login_jarvis_start_failed' if jarvis else 'handlers_reader_3'))
+            if isolated:
+                print(f"Tenant login did not start for {chat_id}: exit {proc.poll()}", flush=True)
+                send_message(chat_id, t('tenant_unavailable'))
+            else:
+                send_message(chat_id, t('handlers_login_jarvis_start_failed' if jarvis else 'handlers_reader_3'))
 
     threading.Thread(target=reader, daemon=True).start()
 
@@ -1673,15 +1793,24 @@ def feed_login_code(chat_id, code, state, login_key=None):
             if info.get("jarvis") and pending_logins.get(login_key) is not info:
                 return
             try:
-                r = subprocess.run(
-                    [CLAUDE_BIN, "auth", "status"],
-                    env=claude_env(info["config_dir"]),
-                    capture_output=True, text=True, timeout=15,
-                )
+                if info.get("isolated"):
+                    kind = "delegate" if info["delegated"] else "main"
+                    argv = tenant_run_argv(chat_id, kind, command="claude", args=("auth", "status"))
+                    r = subprocess.run(argv, cwd="/", env={"PATH": "/usr/bin:/bin"},
+                                       capture_output=True, text=True, timeout=15)
+                else:
+                    r = subprocess.run(
+                        [CLAUDE_BIN, "auth", "status"],
+                        env=claude_env(info["config_dir"]),
+                        capture_output=True, text=True, timeout=15,
+                    )
+                if info.get("isolated") and r.returncode and not r.stdout.strip():
+                    # A logged-out account exits non-zero but still prints its JSON; empty stdout means a refusal.
+                    raise TenantUnavailable((r.stderr or "tenant auth status failed").strip())
                 d = json.loads(r.stdout)
                 if info.get("jarvis") and pending_logins.get(login_key) is not info:
                     return
-                if d.get("loggedIn") and _login_credentials_ready(info):
+                if d.get("loggedIn") and (info.get("isolated") or _login_credentials_ready(info)):
                     if info.get("jarvis"):
                         success_message = t('handlers_login_jarvis_success')
                     elif info["delegated"]:
@@ -1700,13 +1829,14 @@ def feed_login_code(chat_id, code, state, login_key=None):
                         # so that's the real signal, not "is this the first
                         # login ever" (caught live 2026-10-09: every non-owner
                         # tenant got re-asked their name on every re-login).
-                        persona_path = _persona_path(chat_id)
-                        needs_name = True
-                        try:
-                            with open(persona_path, encoding="utf-8") as f:
-                                needs_name = "<user>" in f.read()
-                        except FileNotFoundError:
-                            pass
+                        needs_name = False if info.get("isolated") else True
+                        if not info.get("isolated"):
+                            persona_path = _persona_path(chat_id)
+                            try:
+                                with open(persona_path, encoding="utf-8") as f:
+                                    needs_name = "<user>" in f.read()
+                            except FileNotFoundError:
+                                pass
                         if needs_name:
                             set_account_status(state, target_key, "awaiting_display_name")
                             success_message = t('handlers_check_3')
@@ -1721,6 +1851,13 @@ def feed_login_code(chat_id, code, state, login_key=None):
                         _stop_chat_process(target_key)
                     send_message(chat_id, success_message)
                     return
+            except TenantUnavailable as exc:
+                print(f"Tenant unavailable: {exc}", flush=True)
+                if pending_logins.get(login_key) is info:
+                    set_account_status(state, target_key, "login_failed")
+                    _cleanup_login(login_key, info)
+                    send_message(chat_id, t('tenant_unavailable'))
+                return
             except Exception:
                 pass
             time.sleep(2)
@@ -1767,26 +1904,36 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
         elif text and re.fullmatch(r"\S{20,}", text):
             feed_login_code(chat_id, text, state, login_key=jarvis_key)
             return True
-        if get_account_status(state, chat_id) == "ready":
-            return False
+        try:
+            if get_account_status(state, chat_id) == "ready":
+                return False
+        except TenantUnavailable as exc:
+            print(f"Tenant unavailable: {exc}", flush=True)
+            send_message(chat_id, t('tenant_unavailable'))
+            return True
     if active_login and active_login.get("delegated"):
         if text and text.strip().lower().lstrip("/.").split()[0:1] == ["login"]:
-            start_login(chat_id, state, delegated=True)
-            send_message(chat_id, t('handlers_handle_onboarding_1'))
+            if start_login(chat_id, state, delegated=True) is not False:
+                send_message(chat_id, t('handlers_handle_onboarding_1'))
         elif text and not text.startswith(("/", ".")):
             feed_login_code(chat_id, text.strip(), state)
         else:
             send_message(chat_id, t('handlers_handle_onboarding_2'))
         return True
 
-    status = get_account_status(state, chat_id)
+    try:
+        status = get_account_status(state, chat_id)
+    except TenantUnavailable as exc:
+        print(f"Tenant unavailable: {exc}", flush=True)
+        send_message(chat_id, t('tenant_unavailable'))
+        return True
     if status == "ready":
         return False
 
     if status == "awaiting_code":
         if text and text.strip().lower().lstrip("/.").split()[0:1] == ["login"]:
-            start_login(chat_id, state)
-            send_message(chat_id, t('handlers_handle_onboarding_3'))
+            if start_login(chat_id, state) is not False:
+                send_message(chat_id, t('handlers_handle_onboarding_3'))
             return True
         if text and not text.startswith(("/", ".")):
             feed_login_code(chat_id, text.strip(), state)
@@ -1810,8 +1957,8 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
         send_message(chat_id, t('handlers_handle_onboarding_4'))
         return True
 
-    start_login(chat_id, state)
-    send_message(chat_id, t('handlers_handle_onboarding_5'))
+    if start_login(chat_id, state) is not False:
+        send_message(chat_id, t('handlers_handle_onboarding_5'))
     return True
 
 
@@ -1831,9 +1978,14 @@ def handle_callback_query(cq, state):
         return
 
     answer_callback_query(cq["id"], t('handlers_handle_callback_query_2'))
-    status = get_account_status(state, chat_id)
+    try:
+        status = get_account_status(state, chat_id)
+    except TenantUnavailable as exc:
+        print(f"Tenant unavailable: {exc}", flush=True)
+        send_message(chat_id, t('tenant_unavailable'))
+        return
     if status == "ready":
         send_message(chat_id, t('handlers_handle_callback_query_3'))
     elif status != "awaiting_code":
-        start_login(chat_id, state)
-        send_message(chat_id, t('handlers_handle_onboarding_5'))
+        if start_login(chat_id, state) is not False:
+            send_message(chat_id, t('handlers_handle_onboarding_5'))

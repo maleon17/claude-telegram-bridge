@@ -34,6 +34,7 @@ from runtime import (
     SERVICE_NAME, WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset, draining,
     ensure_owner_mcp_config, intake_active, intake_lock, intake_queues, load_whitelist,
     pending_batches, pending_progress_lock, pending_progress_msg_ids, tenant_file_outbox,
+    TenantUnavailable,
 )
 from state_store import (
     _set_chat_language, clear_pending_prompt, get_account_status, get_pending_prompt,
@@ -491,7 +492,7 @@ def _cross_delegate_watcher_loop(state):
                     result_text = (
                         t('bridge_cross_delegate_watcher_loop_3')
                     )
-                elif get_account_status(state, chat_id) != "ready":
+                elif _account_status_or_report(state, chat_id) != "ready":
                     result_text = (
                         t('bridge_cross_delegate_watcher_loop_4')
                     )
@@ -801,6 +802,16 @@ def _process_message(msg, state):
         send_message(chat_id, t('bridge_process_message_12', value0=err))
 
 
+def _account_status_or_report(state, chat_id):
+    try:
+        return get_account_status(state, chat_id)
+    except TenantUnavailable as exc:
+        print(f"Tenant unavailable: {exc}", flush=True)
+        _set_chat_language(state, chat_id)
+        send_message(chat_id, t('tenant_unavailable'))
+        return None
+
+
 def _is_urgent_stop(msg, state):
     """/stop from a ready, whitelisted chat is answered on the polling thread
     right away, even while that chat's intake worker is busy downloading or
@@ -814,7 +825,7 @@ def _is_urgent_stop(msg, state):
     user_id = msg.get("from", {}).get("id")
     return (
         str(user_id) in load_whitelist()
-        and get_account_status(state, msg["chat"]["id"]) == "ready"
+        and _account_status_or_report(state, msg["chat"]["id"]) == "ready"
     )
 
 

@@ -31,6 +31,99 @@ STATE_FILE = os.environ.get(
 )
 STATE_INSTANCE_NAME = os.path.splitext(os.path.basename(STATE_FILE))[0]
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", os.path.expanduser("~/.local/bin/claude"))
+BRIDGE_ISOLATION = os.environ.get("BRIDGE_ISOLATION", "off")
+ISOLATED_TENANTS = frozenset(part.strip() for part in os.environ.get("ISOLATED_TENANTS", "").split(",") if part.strip())
+BRIDGE_TENANT_PROVISION = os.environ.get("BRIDGE_TENANT_PROVISION", "/usr/local/sbin/tenant-provision")
+BRIDGE_TENANT_RUN = os.environ.get("BRIDGE_TENANT_RUN", "/usr/local/sbin/tenant-run")
+_tenant_cache = {}
+_tenant_cache_lock = threading.Lock()
+
+
+class TenantUnavailable(RuntimeError):
+    """The isolated tenant cannot be provisioned or run."""
+
+
+def tenant_identity(chat_id):
+    value = str(chat_id)
+    return (value.removeprefix("delegate:"), "delegate" if value.startswith("delegate:") else "main")
+
+
+def tenant_isolated(chat_id):
+    tenant_id, _ = tenant_identity(chat_id)
+    return BRIDGE_ISOLATION == "on" and tenant_id in ISOLATED_TENANTS
+
+
+def ensure_tenant(chat_id, kind="main"):
+    tenant_id, _ = tenant_identity(chat_id)
+    key = (tenant_id, kind)
+    with _tenant_cache_lock:
+        if key in _tenant_cache:
+            return _tenant_cache[key]
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", BRIDGE_TENANT_PROVISION, "ensure", tenant_id, "--kind", kind],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode:
+            raise ValueError((result.stderr or result.stdout).strip() or f"exit {result.returncode}")
+        data = json.loads(result.stdout)
+        if (str(data.get("id")) != tenant_id or data.get("kind") != kind
+                or not isinstance(data.get("home"), str)
+                or not isinstance(data.get("exchange"), str)
+                or not isinstance(data.get("uid"), int)
+                or not os.path.isabs(data["home"]) or not os.path.isabs(data["exchange"])):
+            raise ValueError("invalid tenant-provision response")
+    except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError) as exc:
+        raise TenantUnavailable(f"tenant {tenant_id} ({kind}): {exc}") from exc
+    with _tenant_cache_lock:
+        _tenant_cache[key] = data
+    return data
+
+
+def tenant_run_argv(chat_id, kind, cwd="workspace", env=None, command="claude", args=()):
+    tenant_id, _ = tenant_identity(chat_id)
+    ensure_tenant(tenant_id, kind)
+    argv = ["sudo", "-n", BRIDGE_TENANT_RUN, tenant_id, "--kind", kind,
+            "--product", "bridge", "--cwd", cwd]
+    allowed = {"CHAT_ID", "INSTANCE_ID", "TOPIC_ID", "EXCLUDE_MSG_ID",
+               "CLAUDE_TELEGRAM_OUTBOX", "MAX_THINKING_TOKENS"}
+    for key, value in (env or {}).items():
+        if key not in allowed and not re.fullmatch(r"DISABLE_[A-Z_]+", key):
+            raise TenantUnavailable(f"tenant-run environment key denied: {key}")
+        argv.extend(("--env", f"{key}={value}"))
+    return argv + ["--", command, *args]
+
+
+def tenant_tool_json(chat_id, kind, command, args=(), cwd="workspace"):
+    argv = tenant_run_argv(chat_id, kind, cwd=cwd, command=command, args=args)
+    try:
+        result = subprocess.run(argv, cwd="/", env={"PATH": "/usr/bin:/bin"},
+                                capture_output=True, text=True, timeout=35)
+        # `claude auth status` answers a logged-out account with a non-zero exit AND valid JSON on stdout;
+        # that is a normal answer, unlike a tenant-run refusal (non-zero exit, empty stdout, reason on stderr).
+        auth_status = command == "claude" and tuple(args) == ("auth", "status")
+        if result.returncode and not (auth_status and result.stdout.strip()):
+            raise ValueError((result.stderr or result.stdout).strip() or f"exit {result.returncode}")
+        data = json.loads(result.stdout)
+        if command == "list-sessions" and (
+            not isinstance(data, dict) or not isinstance(data.get("sessions"), list)
+            or any(not isinstance(item, dict) or not all(
+                isinstance(item.get(key), str) for key in ("id", "mtime", "preview"))
+                for item in data["sessions"])
+        ):
+            raise ValueError("invalid list-sessions response")
+        if command == "account-limits" and (
+            not isinstance(data, dict) or not isinstance(data.get("lines"), list)
+            or any(not isinstance(line, str) for line in data["lines"])
+        ):
+            raise ValueError("invalid account-limits response")
+        if command == "claude" and args == ("auth", "status") and (
+            not isinstance(data, dict) or not isinstance(data.get("loggedIn"), bool)
+        ):
+            raise ValueError("invalid auth status response")
+        return data
+    except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError) as exc:
+        raise TenantUnavailable(f"tenant tool {command}: {exc}") from exc
 SERVICE_NAME = os.environ.get("SERVICE_NAME")  # this instance's own systemd unit, for /restart
 PROJECTS_DIR = os.path.join(
     os.path.expanduser("~/.claude/projects"), WORKDIR.replace("/", "-")
@@ -574,6 +667,8 @@ def _ensure_tenant_workspace_rules(tenant_dir, persona_path):
 
 
 def tenant_file_outbox(chat_id):
+    if tenant_isolated(chat_id):
+        return os.path.join(ensure_tenant(chat_id, tenant_identity(chat_id)[1])["exchange"], "outbox")
     path = os.path.join(ACCOUNTS_DIR, str(chat_id), "outbox")
     os.makedirs(path, mode=0o700, exist_ok=True)
     return path

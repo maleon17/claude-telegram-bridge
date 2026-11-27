@@ -1,0 +1,58 @@
+#!/usr/bin/python3
+"""List Claude sessions for the tenant's current workspace."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import time
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=1000)
+    args = parser.parse_args()
+    home = Path(os.environ["HOME"]).resolve()
+    cwd = Path.cwd().resolve()
+    workspace = home / "workspace"
+    if not cwd.is_relative_to(workspace):
+        parser.error("cwd must be inside tenant workspace")
+    config = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    # Claude Code names the project directory after the cwd with every non-alphanumeric character
+    # replaced by "-"; the older "/"-only form is kept as a fallback for directories made by earlier code.
+    projects = config / "projects"
+    project = projects / re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    if not project.is_dir():
+        project = projects / str(cwd).replace("/", "-")
+    sessions = []
+    for path in project.glob("*.jsonl"):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        preview = ""
+        messages = 0
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("type") in ("user", "assistant"):
+                        messages += 1
+                    content = event.get("content")
+                    if not preview and isinstance(content, str) and content.strip():
+                        preview = content.strip().replace("\n", " ")[:60]
+        except (OSError, UnicodeError):
+            pass
+        sessions.append({"id": path.stem, "mtime": time.strftime("%m-%d %H:%M", time.localtime(stat.st_mtime)),
+                         "size": stat.st_size, "preview": preview, "messages": messages,
+                         "mtime_epoch": stat.st_mtime})
+    sessions.sort(key=lambda item: item["mtime_epoch"], reverse=True)
+    for item in sessions:
+        item.pop("mtime_epoch")
+    print(json.dumps({"sessions": sessions[:max(args.limit, 0)]}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

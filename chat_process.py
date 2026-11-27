@@ -13,6 +13,7 @@ from runtime import (
     CHAT_PROC_IDLE_TIMEOUT_S, CLAUDE_BIN, EDIT_THROTTLE_S, EXTERNAL_RESULT_DIR, STATE_FILE,
     STATE_INSTANCE_NAME, THINKING_SPINNER_FRAMES, WORKDIR, busy_chats, chat_procs,
     chat_procs_lock, claude_env, pending_progress_lock, pending_progress_msg_ids,
+    tenant_identity, tenant_isolated, tenant_run_argv, tenant_file_outbox,
 )
 from state_store import (
     _set_chat_language, add_usage, clear_pending_prompt, get_pending_delegator, get_session,
@@ -839,16 +840,26 @@ def _chat_reader_loop(chat_id, state, record):
             # (e.g. the idle reaper stopped a genuinely idle process),
             # there's nothing to report.
             try:
-                _deliver_turn_result(
-                    chat_id,
-                    state,
-                    ts,
-                    original_prompt,
-                    proc,
-                    stopped=True,
-                    output_chat_id=telegram_chat_id,
-                    delegated=record.get("delegated", False),
-                )
+                with chat_procs_lock:
+                    active = chat_procs.get(chat_id, {}).get("proc") is proc
+                if tenant_isolated(telegram_chat_id) and active and proc.poll() not in (None, 0):
+                    print(f"Tenant process exited for {chat_id}: {proc.returncode}", flush=True)
+                    message = t('tenant_unavailable')
+                    send_message(telegram_chat_id, message)
+                    if record.get("delegated"):
+                        write_last_turn(telegram_chat_id, message, delegated=True)
+                        write_request_result(pop_delegate_request_id(state, chat_id), message, ok=False)
+                else:
+                    _deliver_turn_result(
+                        chat_id,
+                        state,
+                        ts,
+                        original_prompt,
+                        proc,
+                        stopped=True,
+                        output_chat_id=telegram_chat_id,
+                        delegated=record.get("delegated", False),
+                    )
             except Exception:
                 print(traceback.format_exc()[-1500:], flush=True)
         with chat_procs_lock:
@@ -887,10 +898,24 @@ def _start_chat_process(
     if effort:
         args.append(f"--effort={effort}")
 
+    isolated = tenant_isolated(telegram_chat_id)
+    if isolated:
+        _, kind = tenant_identity(chat_id)
+        forwarded = dict(extra_env or {})
+        forwarded["CHAT_ID"] = str(telegram_chat_id)
+        forwarded["CLAUDE_TELEGRAM_OUTBOX"] = tenant_file_outbox(chat_id)
+        argv = tenant_run_argv(chat_id, kind, cwd=workspace or "workspace",
+                               env=forwarded, args=args[1:])
+        process_cwd = "/"
+        process_env = {"PATH": "/usr/bin:/bin"}
+    else:
+        argv = args
+        process_cwd = workspace or WORKDIR
+        process_env = claude_env(config_dir, telegram_chat_id, extra_env=extra_env)
     proc = subprocess.Popen(
-        args,
-        cwd=workspace or WORKDIR,
-        env=claude_env(config_dir, telegram_chat_id, extra_env=extra_env),
+        argv,
+        cwd=process_cwd,
+        env=process_env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

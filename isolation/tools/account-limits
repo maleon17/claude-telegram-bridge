@@ -1,0 +1,31 @@
+#!/usr/bin/python3
+"""Return Claude account usage headlines from inside the tenant uid."""
+import json
+import os
+import subprocess
+
+
+def main():
+    result = subprocess.run(
+        [os.environ.get("CLAUDE_BIN", "/opt/claude/bin/claude"), "-p", "/usage", "--output-format=stream-json",
+         "--verbose", "--dangerously-skip-permissions", "--no-session-persistence"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode:
+        raise SystemExit("Claude usage failed")
+    lines = []
+    if result.returncode == 0:
+        for raw in result.stdout.splitlines():
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "result":
+                lines = [line.strip() for line in str(event.get("result", "")).splitlines()
+                         if line.strip().startswith(("Current session", "Current week"))]
+                break
+    print(json.dumps({"lines": lines}))
+
+
+if __name__ == "__main__":
+    main()

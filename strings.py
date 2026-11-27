@@ -9,6 +9,8 @@ current_language: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 STRINGS: dict[str, dict[str, str]] = {
     "ru": {
+        'tenant_unavailable': 'Изолированный аккаунт временно недоступен. Попробуйте позже.',
+        'tenant_workspace_invalid': 'Рабочая папка должна быть внутри workspace/ вашего аккаунта.',
         'bridge_file_send_watcher_loop_1': 'Отклонено: повреждённый запрос отправки файла.',
         'bridge_file_send_watcher_loop_2': 'Отклонено: некорректный Telegram chat_id.',
         'bridge_file_send_watcher_loop_3': 'Отклонено: Telegram ID отсутствует в whitelist Claude bridge.',
@@ -236,24 +238,32 @@ STRINGS: dict[str, dict[str, str]] = {
         'language_persona_failed': 'Язык интерфейса переключён на русский, но перевести персону не удалось: {error}',
     },
     "en": {
+        'tenant_unavailable': 'Your isolated account is temporarily unavailable. Please try again later.',
+        'tenant_workspace_invalid': 'The working folder must be inside your account workspace/.',
         'language_usage': 'Usage: /language en|ru|uk|kk|de.',
         'language_progress': 'Please wait, switching to English…',
         'language_changed': 'Language switched to English.',
         'language_persona_failed': 'The interface is now in English, but the persona could not be translated: {error}',
     },
     "uk": {
+        'tenant_unavailable': 'Ізольований акаунт тимчасово недоступний. Спробуйте пізніше.',
+        'tenant_workspace_invalid': 'Робоча папка має бути всередині workspace/ вашого акаунта.',
         'language_usage': 'Використання: /language en|ru|uk|kk|de.',
         'language_progress': 'Зачекайте, перемикаємо мову на українську…',
         'language_changed': 'Мову змінено на українську.',
         'language_persona_failed': 'Мову інтерфейсу змінено на українську, але персону не вдалося перекласти: {error}',
     },
     "kk": {
+        'tenant_unavailable': 'Оқшауланған аккаунт уақытша қолжетімсіз. Кейінірек қайталап көріңіз.',
+        'tenant_workspace_invalid': 'Жұмыс бумасы аккаунтыңыздың workspace/ бумасында болуы керек.',
         'language_usage': 'Қолданылуы: /language en|ru|uk|kk|de.',
         'language_progress': 'Күте тұрыңыз, тілді қазақ тіліне ауыстырып жатырмыз…',
         'language_changed': 'Тіл қазақ тіліне ауыстырылды.',
         'language_persona_failed': 'Интерфейс тілі қазақ тіліне ауыстырылды, бірақ персонаны аудару мүмкін болмады: {error}',
     },
     "de": {
+        'tenant_unavailable': 'Dein isoliertes Konto ist vorübergehend nicht verfügbar. Bitte versuche es später erneut.',
+        'tenant_workspace_invalid': 'Der Arbeitsordner muss in workspace/ deines Kontos liegen.',
         'language_usage': 'Verwendung: /language en|ru|uk|kk|de.',
         'language_progress': 'Bitte warten, wir wechseln auf Deutsch …',
         'language_changed': 'Sprache auf Deutsch umgestellt.',

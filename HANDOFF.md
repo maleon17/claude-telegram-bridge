@@ -128,6 +128,14 @@ tenant is created so `/resume` continues to work after migration.
 Delegated turns use another isolated home and require `/login delegate`
 before their first use. The ordinary `/login` authenticates the chat home.
 
+Optional tenant isolation is gated by `BRIDGE_ISOLATION=on` and the
+`ISOLATED_TENANTS` list. Selected chats and their delegate processes are
+provisioned through root-owned helpers and launched under their own Unix uid;
+provisioning failure blocks the turn. The bridge calls tenant-side tools for
+session listings and account limits. This integration needs separately installed
+helpers and tools; the public installer does not yet provide isolation setup.
+The legacy background wakeup signal is unavailable in isolated processes.
+
 Every tenant's persona also carries a short workspace rule (`WORKSPACE_RULES`
 in `runtime.py`, appended once in the persona's language): work inside the
 tenant's own working folder rather than the home directory, and move the

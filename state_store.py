@@ -9,7 +9,8 @@ from strings import current_language, t
 
 from runtime import (
     ACCOUNTS_DIR, CLAUDE_BIN, COST_WARNING_USD, OWNER_ID, PROJECTS_DIR, RESTART_SIGNAL_FILE,
-    STATE_FILE, WORKDIR, claude_env, state_lock,
+    STATE_FILE, WORKDIR, claude_env, state_lock, tenant_isolated, tenant_identity,
+    tenant_tool_json,
 )
 from telegram_api import send_message
 
@@ -266,6 +267,13 @@ def set_permission_mode(state, chat_id, mode):
 
 
 def get_workspace(state, chat_id):
+    if tenant_isolated(chat_id):
+        stored = state.get(str(chat_id), {}).get("workspace")
+        if (isinstance(stored, str) and not os.path.isabs(stored)
+                and ".." not in stored.split("/")
+                and (stored == "workspace" or stored.startswith("workspace/"))):
+            return stored
+        return "workspace"
     return state.get(str(chat_id), {}).get("workspace") or WORKDIR
 
 
@@ -350,6 +358,16 @@ def pending_deliveries(state):
         ]
 
 
+# Checking an isolated tenant's login costs a sudo + tenant-run + claude round trip (~0.5 s) and the status
+# is consulted for every incoming message, so a positive answer is remembered briefly.
+ISOLATED_READY_TTL_S = 30
+_isolated_ready_at = {}
+
+
+def forget_isolated_ready(chat_id):
+    _isolated_ready_at.pop(str(chat_id), None)
+
+
 def get_account_status(state, chat_id):
     """None (not started) / ``awaiting_code`` / ``ready``.
 
@@ -362,8 +380,19 @@ def get_account_status(state, chat_id):
     can be consumed as the OAuth code. A delegated key has no such default.
     """
     status = state.get(str(chat_id), {}).get("account_status")
-    if status:
+    if status and (not tenant_isolated(chat_id) or status != "ready"):
         return status
+    if tenant_isolated(chat_id):
+        key, now = str(chat_id), time.time()
+        if now - _isolated_ready_at.get(key, 0) < ISOLATED_READY_TTL_S:
+            return "ready"
+        _, kind = tenant_identity(chat_id)
+        result = tenant_tool_json(chat_id, kind, "claude", ("auth", "status"))
+        if result.get("loggedIn"):
+            _isolated_ready_at[key] = now
+            return "ready"
+        _isolated_ready_at.pop(key, None)
+        return None
     if str(chat_id) == str(OWNER_ID) and os.path.exists(
         os.path.join(ACCOUNTS_DIR, str(OWNER_ID), ".credentials.json")
     ):
@@ -451,7 +480,7 @@ def _localize_limit_line(line):
     return t("account_limit_line", label=label, percent=match.group(3), reset=reset)
 
 
-def fetch_account_limits(config_dir=None):
+def fetch_account_limits(config_dir=None, chat_id=None):
     """Shell out to Claude Code's own /usage slash command for real account-level
     5-hour/weekly rate limit info. Runs as a standalone call (no --resume) so it
     doesn't pollute any conversation's session transcript -- and with
@@ -463,6 +492,11 @@ def fetch_account_limits(config_dir=None):
     Returns just the two headline lines (session / week), not the verbose
     "what's contributing" breakdown.
     """
+    if chat_id is not None and tenant_isolated(chat_id):
+        _, kind = tenant_identity(chat_id)
+        result = tenant_tool_json(chat_id, kind, "account-limits")
+        headline = result.get("lines", [])
+        return "\n".join(_localize_limit_line(line) for line in headline) if headline else t('state_store_fetch_account_limits_2')
     try:
         proc = subprocess.run(
             [

@@ -29,7 +29,7 @@ Each chat keeps one long-lived Claude Code process, so a conversation is a real,
 - **Approve or deny** — in the stricter modes a risky action waits for your `/approve`.
 - **Files both ways** — photos and documents go in; results come back as attachments.
 - **Voice messages** — transcribed locally with `faster-whisper` (optional).
-- **Several users, fully isolated** — each with their own Claude login, sessions and usage.
+- **Several users, separate Claude homes** — each with their own Claude login, sessions and usage.
 - **Safe operations** — `/update` tests a new version before switching to it; restarts wait for running answers.
 
 ## Install in three steps
@@ -90,6 +90,14 @@ Put their numeric Telegram IDs into `whitelist.txt` (one per line or comma-separ
 Every chat lives in `accounts/<chat_id>/`. On your own first use, your existing persona (`~/.claude/CLAUDE.md`), MCP servers and past sessions are copied in — your credentials are not. Removing an ID blocks new messages; their data stays on disk until you delete it.
 
 > **Security:** all users share the service's Linux user, and `bypass` gives Claude everything that user can do. Whitelist only people you trust; use separate Linux users or containers if you need hard isolation.
+
+## Tenant isolation (optional)
+
+Set `BRIDGE_ISOLATION=on` and `ISOLATED_TENANTS=<comma-separated Telegram IDs>` in the bridge environment to run selected Claude chats and their delegate tenants under separate Unix users. The default is `BRIDGE_ISOLATION=off`; unlisted chats keep the existing behavior. Tests can override helper paths with `BRIDGE_TENANT_PROVISION` and `BRIDGE_TENANT_RUN`.
+
+This mode requires installed root-owned `tenant-provision` and `tenant-run` helpers, their sudo rules, and the root-owned `account-limits` and `list-sessions` tools under `/opt/telegram-ai/tools/`. The installer mode for isolation has not been published yet, so a normal `setup.sh` installation cannot enable it by itself. If provisioning fails, the selected chat cannot start a turn. Its `/workspace` is limited to its own `workspace/` and stored as a relative path.
+
+Known limits: `WAKEUP_SIGNAL_DIR` is not passed into isolated processes, so background commands cannot self-report through that legacy signal path until a separate task. Tenant persona/MCP configuration and file exchange remain outside this step of isolation integration; keep the mode restricted to staged tenants until those parts are integrated.
 
 ## Together with the rest of Telegram AI
 
