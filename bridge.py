@@ -34,8 +34,9 @@ from runtime import (
     SERVICE_NAME, WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset, draining,
     ensure_owner_mcp_config, intake_active, intake_lock, intake_queues, load_whitelist,
     pending_batches, pending_progress_lock, pending_progress_msg_ids, tenant_file_outbox,
-    TenantUnavailable,
+    TenantUnavailable, BRIDGE_ISOLATION, ISOLATED_TENANTS, ensure_tenant, tenant_isolated,
 )
+from tenant_exchange import process_tenant_queue
 from state_store import (
     _set_chat_language, clear_pending_prompt, get_account_status, get_pending_prompt,
     get_voice_language, load_state,
@@ -155,6 +156,19 @@ def _file_send_watcher_loop(state=None):
                 _write_file_send_result(request_id, ok, result_text)
             except Exception as exc:
                 print(f"Could not write file-send result {request_id}: {exc}", flush=True)
+
+
+def _isolated_file_send_watcher_loop(tenant_id):
+    """Poll one main tenant so its slow Telegram sends cannot delay peers."""
+    while True:
+        time.sleep(1.0)
+        if BRIDGE_ISOLATION != "on":
+            continue
+        try:
+            exchange = ensure_tenant(tenant_id, "main")["exchange"]
+            process_tenant_queue(int(tenant_id), exchange, send_document, MAX_DOCUMENT_BYTES)
+        except Exception as exc:
+            print(f"Isolated file queue unavailable for tenant {tenant_id}: {type(exc).__name__}", flush=True)
 
 
 def _is_forwarded_message(msg):
@@ -625,6 +639,7 @@ def _process_message(msg, state):
     photo = msg.get("photo")
     document = msg.get("document")
     voice = msg.get("voice")
+    video = msg.get("video") if tenant_isolated(chat_id) else None
     caption = msg.get("caption") or ""
     rich_message = msg.get("rich_message")
     forwarded = _is_forwarded_message(msg)
@@ -636,7 +651,7 @@ def _process_message(msg, state):
             print(traceback.format_exc()[-1500:], flush=True)
 
     if (
-        not text and not caption and not photo and not document and not voice
+        not text and not caption and not photo and not document and not voice and not video
         and not rich_message and not _message_kind_note(msg) and not forwarded
     ):
         return
@@ -724,7 +739,7 @@ def _process_message(msg, state):
             return
 
         if (
-            not photo and not document and not voice and text.startswith(("/", "."))
+            not photo and not document and not voice and not video and text.startswith(("/", "."))
             and not forwarded
         ):
             if handle_command(chat_id, text, state, offset=current_offset[0]):
@@ -738,10 +753,10 @@ def _process_message(msg, state):
                 t('bridge_process_message_9'),
             )
             voice = None
-            if not (text.strip() or caption.strip() or photo or document):
+            if not (text.strip() or caption.strip() or photo or document or video):
                 return
         download_progress_msg_id = None
-        if LOCAL_BOT_API and (photo or document or voice):
+        if LOCAL_BOT_API and (photo or document or voice or video):
             status = send_message(chat_id, t('bridge_process_message_10'))
             if status.get("ok"):
                 download_progress_msg_id = (status.get("result") or {}).get("message_id")
@@ -763,6 +778,17 @@ def _process_message(msg, state):
                     file_size=document.get("file_size"),
                 )
                 attachment_note += f"\n\n[Прикреплён файл: {local_path}]"
+            except AttachmentDownloadError as exc:
+                send_message(chat_id, str(exc))
+                detail = str(exc).removeprefix("Файл не скачан: ")
+                attachment_note += f"\n\n[Файл не скачан: {detail}. Не ищи его на диске.]"
+        if video:
+            try:
+                local_path = download_telegram_file(
+                    chat_id, video["file_id"], filename_hint=video.get("file_name"),
+                    file_size=video.get("file_size"),
+                )
+                attachment_note += f"\n\n[Прикреплено видео: {local_path}]"
             except AttachmentDownloadError as exc:
                 send_message(chat_id, str(exc))
                 detail = str(exc).removeprefix("Файл не скачан: ")
@@ -900,6 +926,11 @@ def main():
     threading.Thread(target=_external_request_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_cross_delegate_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_file_send_watcher_loop, args=(state,), daemon=True).start()
+    if BRIDGE_ISOLATION == "on" and ISOLATED_TENANTS:
+        for tenant_id in ISOLATED_TENANTS:
+            if tenant_id.isdecimal():
+                threading.Thread(target=_isolated_file_send_watcher_loop,
+                                 args=(tenant_id,), daemon=True).start()
     threading.Thread(target=_wakeup_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_chat_proc_idle_reaper_loop, daemon=True).start()
     threading.Thread(target=_pending_delivery_watcher_loop, args=(state,), daemon=True).start()

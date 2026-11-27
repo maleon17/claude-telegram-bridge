@@ -3,6 +3,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 import urllib.error
@@ -16,12 +17,91 @@ from runtime import (
     API_BASE, FILE_API_BASE, FILE_PATH_EXTENSIONS, FILE_PATH_RE, GET_FILE_TIMEOUT_S, IMAGE_EXTS,
     LOCAL_BOT_API, MAX_DOCUMENT_BYTES, MAX_MSG_LEN, MAX_PHOTO_BYTES,
     RICH_MAX_CHARS, SEND_TIMEOUT_S, TELEGRAM_CLOUD_FILE_MAX_BYTES, UPLOADS_DIR,
+    ensure_tenant, tenant_isolated,
 )
+from tenant_exchange import open_exchange_dir
 from telegram_format import format_message, strip_mdv2
 
 # Raw characters per plain edit: leaves room for MarkdownV2 escaping to grow
 # the text without hitting MAX_MSG_LEN.
 PLAIN_EDIT_CHUNK = 3000
+INBOX_MAX_AGE_S = 7 * 24 * 60 * 60
+INBOX_MAX_BYTES = 500 * 1024 * 1024
+
+
+def _prune_tenant_inbox(inbox_fd, now=None):
+    now = time.time() if now is None else now
+    files = []
+    with os.scandir(inbox_fd) as entries:
+        for entry in entries:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if info.st_mtime < now - INBOX_MAX_AGE_S:
+                try:
+                    os.unlink(entry.name, dir_fd=inbox_fd)
+                except FileNotFoundError:
+                    pass
+            else:
+                files.append((info.st_mtime, entry.name, info.st_size))
+    total = sum(size for _, _, size in files)
+    for _, name, size in sorted(files):
+        if total <= INBOX_MAX_BYTES:
+            break
+        try:
+            os.unlink(name, dir_fd=inbox_fd)
+            total -= size
+        except FileNotFoundError:
+            pass
+
+
+def _download_isolated_file(chat_id, file_id, file_path, filename_hint):
+    exchange = ensure_tenant(chat_id, "main")["exchange"]
+    inbox_fd = open_exchange_dir(exchange, "inbox")
+    name = re.sub(r"[^\w.\-]", "_", filename_hint or os.path.basename(file_path) or f"{file_id}.bin")[:80].replace("..", "_")
+    name = f"{int(time.time() * 1000)}_{uuid.uuid4().hex}_{name or 'file.bin'}"
+    local_path = os.path.join(exchange, "inbox", name)
+    fd = None
+    try:
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o644, dir_fd=inbox_fd)
+        os.fchmod(fd, 0o644)
+        total = 0
+        if LOCAL_BOT_API and os.path.isabs(file_path):
+            source_fd = os.open(file_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            source = os.fdopen(source_fd, "rb")
+            if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+                source.close()
+                raise AttachmentDownloadError("local_file_access", t('telegram_api_download_telegram_file_3'))
+        else:
+            source = urllib.request.urlopen(f"{FILE_API_BASE}/{file_path}", timeout=GET_FILE_TIMEOUT_S)
+        with source, os.fdopen(fd, "wb", closefd=False) as target:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > min(MAX_DOCUMENT_BYTES, INBOX_MAX_BYTES):
+                    raise AttachmentDownloadError("too_big", t('telegram_api_download_telegram_file_4'))
+                target.write(chunk)
+        if LOCAL_BOT_API and os.path.isabs(file_path):
+            os.unlink(file_path)
+        _prune_tenant_inbox(inbox_fd)
+        return local_path
+    except Exception:
+        if fd is not None:
+            try:
+                os.unlink(name, dir_fd=inbox_fd)
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(inbox_fd)
 
 def _tg_rate_limited(response):
     return response.get("error_code") == 429
@@ -269,6 +349,13 @@ def download_telegram_file(chat_id, file_id, filename_hint=None, file_size=None)
         raise AttachmentDownloadError(
             "get_file_failed", t('telegram_api_download_telegram_file_1')
         )
+    if tenant_isolated(chat_id):
+        try:
+            return _download_isolated_file(chat_id, file_id, file_path, filename_hint)
+        except AttachmentDownloadError:
+            raise
+        except Exception as exc:
+            raise _download_error_from_exception(exc) from exc
     name = re.sub(r"[^\w.\-]", "_", filename_hint or os.path.basename(file_path) or f"{file_id}.bin")
     chat_dir = os.path.join(UPLOADS_DIR, str(chat_id))
     local_path = os.path.join(chat_dir, f"{int(time.time() * 1000)}_{name}")

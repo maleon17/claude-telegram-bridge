@@ -106,8 +106,14 @@ def _atomic_control_write(path, contents, mode):
 
 
 def _isolated_mcp_servers(chat_id):
-    """Single allowlist for isolated tenant MCP servers; I5 can extend it."""
-    return {}
+    """Single allowlist for isolated tenant MCP servers."""
+    directory = os.environ.get("BRIDGE_ISOLATED_MCP_DIR", "/opt/telegram-ai/mcp")
+    script = os.path.join(directory, "send_telegram_file_mcp.py")
+    if not os.path.isfile(script):
+        print(f"Isolated file MCP unavailable: {script}", flush=True)
+        return {}
+    return {"send-telegram-file": {"type": "stdio", "command": "/usr/bin/python3",
+                                   "args": [script], "env": {}}}
 
 
 def ensure_tenant_control(chat_id):
@@ -119,7 +125,30 @@ def ensure_tenant_control(chat_id):
         _atomic_control_write(persona, contents, 0o600)
         _write_default_persona_marker(tenant_control_dir(chat_id), contents)
     _ensure_tenant_workspace_rules(tenant_control_dir(chat_id), persona, control=True)
-    mcp = (json.dumps({"mcpServers": _isolated_mcp_servers(chat_id)},
+    servers = _isolated_mcp_servers(chat_id)
+    with open(persona, "r", encoding="utf-8") as handle:
+        content = handle.read(1024 * 1024 + 1)
+    if len(content) > 1024 * 1024:
+        raise TenantUnavailable("isolated persona exceeds 1 MiB")
+    marker = os.path.join(tenant_control_dir(chat_id), ".persona_default_sha256")
+    try:
+        with open(marker, "r", encoding="ascii") as handle:
+            was_default = handle.read(66).strip() == hashlib.sha256(content.encode("utf-8")).hexdigest()
+    except (OSError, UnicodeError):
+        was_default = False
+    updated = content
+    if servers:
+        if FILE_SEND_AGENTS_MARKER not in content and not (
+                "CLAUDE_TELEGRAM_OUTBOX" in content and "send_telegram_file" in content):
+            updated = content.rstrip() + "\n\n" + FILE_SEND_AGENTS_SECTION + "\n"
+    elif "\n\n" + FILE_SEND_AGENTS_SECTION + "\n" in content:
+        updated = content.replace("\n\n" + FILE_SEND_AGENTS_SECTION + "\n", "\n")
+    if updated != content:
+        contents = updated.encode("utf-8")
+        _atomic_control_write(persona, contents, 0o600)
+        if was_default:
+            _write_default_persona_marker(tenant_control_dir(chat_id), contents)
+    mcp = (json.dumps({"mcpServers": servers},
                       ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     _atomic_control_write(tenant_mcp_path(chat_id), mcp, 0o600)
 

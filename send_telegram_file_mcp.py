@@ -15,6 +15,13 @@ RESULT_DIR = BRIDGE_DIR / "file_send_result"
 POLL_TIMEOUT_S = 45
 POLL_INTERVAL_S = 0.2
 
+
+def _directories():
+    exchange = os.environ.get("TENANT_EXCHANGE_DIR")
+    if exchange:
+        return Path(exchange) / "queue", Path(exchange) / "result"
+    return QUEUE_DIR, RESULT_DIR
+
 SERVER_INFO = {"name": "send-telegram-file", "version": "1.0.0"}
 TOOL = {
     "name": "send_telegram_file",
@@ -37,13 +44,18 @@ TOOL = {
 
 
 def _write_request(request_id, chat_id, path, caption):
-    QUEUE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    RESULT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    request_path = QUEUE_DIR / f"{request_id}.json"
-    temporary = QUEUE_DIR / f".{request_id}.{os.getpid()}.tmp"
+    queue_dir, result_dir = _directories()
+    if not os.environ.get("TENANT_EXCHANGE_DIR"):
+        queue_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        result_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    request_path = queue_dir / f"{request_id}.json"
+    temporary = queue_dir / f".{request_id}.{os.getpid()}.tmp"
     try:
         with temporary.open("x", encoding="utf-8") as handle:
-            json.dump({"chat_id": chat_id, "path": path, "caption": caption}, handle, ensure_ascii=False)
+            request = {"path": path, "caption": caption}
+            if not os.environ.get("TENANT_EXCHANGE_DIR"):
+                request["chat_id"] = chat_id
+            json.dump(request, handle, ensure_ascii=False)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -69,7 +81,7 @@ def _send_file(path, caption=""):
         return False, "Отклонено локально: подпись должна быть строкой."
 
     request_id = str(uuid.uuid4())
-    result_path = RESULT_DIR / f"{request_id}.json"
+    result_path = _directories()[1] / f"{request_id}.json"
     try:
         _write_request(request_id, chat_id, path, caption)
     except OSError as exc:

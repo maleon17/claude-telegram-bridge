@@ -140,6 +140,13 @@ configuration under `tenant_control/`, then restores readable copies to the
 tenant exchange before each Claude launch. Claude receives them through
 `--append-system-prompt-file`, `--mcp-config`, and `--strict-mcp-config`.
 The bridge does not write `CLAUDE.md` or `.claude.json` in their config dirs.
+Isolated file exchange uses `.exchange/inbox/` for incoming attachments,
+`.exchange/outbox/` for files to send, and `.exchange/queue/` and
+`.exchange/result/` for MCP requests and replies. The `send-telegram-file`
+script is loaded from `BRIDGE_ISOLATED_MCP_DIR` (default `/opt/telegram-ai/mcp`)
+when installed. Requests are capped at 64 KB, captions at 1024 characters,
+and outgoing files at `TELEGRAM_FILE_MAX_BYTES`; inbox retention is 7 days
+and 500 MB.
 
 Every tenant's persona also carries a short workspace rule (`WORKSPACE_RULES`
 in `runtime.py`, appended once in the persona's language): work inside the
