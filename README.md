@@ -93,13 +93,15 @@ Every chat lives in `accounts/<chat_id>/`. On your own first use, your existing 
 
 ## Tenant isolation (optional)
 
-Set `BRIDGE_ISOLATION=on` and `ISOLATED_TENANTS=<comma-separated Telegram IDs>` in the bridge environment to run selected Claude chats and their delegate tenants under separate Unix users. The default is `BRIDGE_ISOLATION=off`; unlisted chats keep the existing behavior. Tests can override helper paths with `BRIDGE_TENANT_PROVISION` and `BRIDGE_TENANT_RUN`.
+Set `BRIDGE_ISOLATION=on` and `ISOLATED_TENANTS=<comma-separated Telegram IDs>` in the bridge environment to run selected Claude chats under tenant Unix users. The default is `BRIDGE_ISOLATION=off`; unlisted chats keep the existing behavior. Tests can override helper paths with `BRIDGE_TENANT_PROVISION` and `BRIDGE_TENANT_RUN`.
+For an ordinary isolated tenant, `/login delegate` and delegated turns use the **same Unix uid** as the main chat, with a separate `.claude-delegate` config and a shared workspace. The owner's delegate retains its separate Unix uid. The delegate's persona and MCP copies in `.exchange` are `persona.delegate.md` and `mcp.delegate.json`; the main chat uses `persona.md` and `mcp.json`.
 
 This mode requires installed root-owned `tenant-provision` and `tenant-run` helpers, their sudo rules, and the root-owned `account-limits` and `list-sessions` tools under `/opt/telegram-ai/tools/`. The installer mode for isolation has not been published yet, so a normal `setup.sh` installation cannot enable it by itself. If provisioning fails, the selected chat cannot start a turn. Its `/workspace` is limited to its own `workspace/` and stored as a relative path.
 
 For isolated tenants, the bridge keeps persona and MCP configuration in its `tenant_control/` directory (override with `BRIDGE_TENANT_CONTROL_DIR`) and restores readable copies in the tenant exchange before each Claude launch. It passes those copies through `--append-system-prompt-file`, `--mcp-config`, and `--strict-mcp-config`. The `send-telegram-file` MCP script is loaded from `BRIDGE_ISOLATED_MCP_DIR` (default `/opt/telegram-ai/mcp`) when installed. `WAKEUP_SIGNAL_DIR` is not passed into isolated processes, so background commands cannot self-report through that legacy signal path yet.
 
 Incoming attachments go to `.exchange/inbox/`; agents place outgoing files in `.exchange/outbox/` and submit them through the MCP tool's `.exchange/queue/`, with replies in `.exchange/result/`. Requests are limited to 64 KB, captions to 1024 characters, and outgoing files to `TELEGRAM_FILE_MAX_BYTES`. Inbox files are kept for up to 7 days and within a 500 MB total.
+When the Codex bridge and the isolated `delegate-to-codex` MCP script are installed, Claude writes delegation requests through `.exchange/queue/` and receives replies in `.exchange/result/`. The bridge forwards only the `text` field to the Codex bridge for the tenant identified by the exchange directory. Delegation text is limited to 32,000 characters, with one outstanding request per tenant and a bounded global worker pool. If the peer bridge or script is absent, the tool is omitted.
 
 ## Together with the rest of Telegram AI
 

@@ -36,12 +36,12 @@ format in telegram-ai-core's README). There is no import-level coupling.
 ### Working together
 
 - **Bridge → bridge.** When the Codex bridge is on the host (registry entry or
-  a sibling checkout), every tenant's isolated `.claude.json` — the owner's
-  included — gets a stdio MCP server `delegate-to-codex`. Its
-  `delegate_to_codex(prompt, wait_seconds)` tool takes no Telegram id: it
-  inherits the server-owned `CHAT_ID` of the tenant's `claude -p` process and
-  writes one request into the Codex bridge's `cross_delegate_queue/`. The Codex
-  bridge accepts it only for a whitelisted id whose own account is `ready`,
+  a sibling checkout), non-isolated tenants get the `delegate-to-codex` MCP
+  through their account config; it writes to the Codex bridge's
+  `cross_delegate_queue/`. Isolated tenants get the exchange MCP when its
+  script is installed; the bridge forwards its requests from `.exchange/` to
+  that peer queue using the tenant directory as identity. The Codex bridge
+  accepts a request only for a whitelisted id whose own account is `ready`,
   runs it in that person's isolated delegate runtime, posts the answer in its
   own chat and writes it where the acceptance said; the tool waits for that
   answer and returns it. The Codex bridge's `delegate-to-claude` is the
@@ -130,12 +130,17 @@ before their first use. The ordinary `/login` authenticates the chat home.
 
 Optional tenant isolation is gated by `BRIDGE_ISOLATION=on` and the
 `ISOLATED_TENANTS` list. Selected chats and their delegate processes are
-provisioned through root-owned helpers and launched under their own Unix uid;
+provisioned through root-owned helpers and launched under tenant Unix uids;
 provisioning failure blocks the turn. The bridge calls tenant-side tools for
 session listings and account limits. This integration needs separately installed
 helpers and tools; the public installer does not yet provide isolation setup.
+An ordinary isolated tenant's delegate uses the main tenant uid and workspace,
+with `--product delegate` selecting `.claude-delegate` for its separate login,
+sessions, and limits. The owner's delegate retains a separate uid. The main
+process uses `persona.md` and `mcp.json` in `.exchange`; the delegate uses
+`persona.delegate.md` and `mcp.delegate.json` so their copies do not collide.
 The legacy background wakeup signal is unavailable in isolated processes.
-For isolated tenants, the bridge stores the persona and an empty MCP server
+For isolated tenants, the bridge stores the persona and MCP server
 configuration under `tenant_control/`, then restores readable copies to the
 tenant exchange before each Claude launch. Claude receives them through
 `--append-system-prompt-file`, `--mcp-config`, and `--strict-mcp-config`.
@@ -147,6 +152,12 @@ script is loaded from `BRIDGE_ISOLATED_MCP_DIR` (default `/opt/telegram-ai/mcp`)
 when installed. Requests are capped at 64 KB, captions at 1024 characters,
 and outgoing files at `TELEGRAM_FILE_MAX_BYTES`; inbox retention is 7 days
 and 500 MB.
+When both the Codex bridge and isolated delegation MCP script are present,
+`delegate-to-codex` submits only `text` through `.exchange/queue/`. The bridge
+binds the request to the tenant directory, forwards it through the existing
+peer queue, and returns the answer through `.exchange/result/`. Text is capped
+at 32,000 characters; each tenant may have one outstanding request, and the
+global forwarding worker pool is bounded. Missing peer or script omits the MCP.
 
 Every tenant's persona also carries a short workspace rule (`WORKSPACE_RULES`
 in `runtime.py`, appended once in the persona's language): work inside the

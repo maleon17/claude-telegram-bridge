@@ -150,6 +150,10 @@ def main():
             handlers.start_login(tenant, {}, delegated=False)
             assert str(runner) in calls.pop()[0][-1]
             handlers._cleanup_login(tenant, handlers.pending_logins[tenant])
+            handlers.start_login(tenant, {}, delegated=True)
+            delegate_command = calls.pop()[0][-1]
+            assert "--kind main --product delegate" in delegate_command
+            handlers._cleanup_login(tenant, handlers.pending_logins[tenant])
         provision.write_text("#!/bin/sh\nexit 7\n")
         runtime._tenant_cache.clear()
         chat_process.chat_procs.clear()

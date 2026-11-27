@@ -13,7 +13,7 @@ from runtime import (
     CHAT_PROC_IDLE_TIMEOUT_S, CLAUDE_BIN, EDIT_THROTTLE_S, EXTERNAL_RESULT_DIR, STATE_FILE,
     STATE_INSTANCE_NAME, THINKING_SPINNER_FRAMES, WORKDIR, busy_chats, chat_procs,
     chat_procs_lock, claude_env, pending_progress_lock, pending_progress_msg_ids,
-    tenant_identity, tenant_isolated, tenant_run_argv, tenant_file_outbox,
+    tenant_target, tenant_isolated, tenant_run_argv, tenant_file_outbox,
 )
 from state_store import (
     _set_chat_language, add_usage, clear_pending_prompt, get_pending_delegator, get_session,
@@ -900,7 +900,7 @@ def _start_chat_process(
 
     isolated = tenant_isolated(telegram_chat_id)
     if isolated:
-        _, kind = tenant_identity(chat_id)
+        kind, _ = tenant_target(chat_id)
         forwarded = dict(extra_env or {})
         forwarded["CHAT_ID"] = str(telegram_chat_id)
         forwarded["CLAUDE_TELEGRAM_OUTBOX"] = tenant_file_outbox(chat_id)

@@ -50,6 +50,16 @@ def tenant_identity(chat_id):
     return (value.removeprefix("delegate:"), "delegate" if value.startswith("delegate:") else "main")
 
 
+def tenant_target(chat_id):
+    """Map a state key to its provision kind and tenant-run product."""
+    tenant_id, slot = tenant_identity(chat_id)
+    if slot == "main":
+        return "main", "bridge"
+    if tenant_id == str(OWNER_ID):
+        return "delegate", "bridge"
+    return "main", "delegate"
+
+
 def tenant_isolated(chat_id):
     tenant_id, _ = tenant_identity(chat_id)
     return BRIDGE_ISOLATION == "on" and tenant_id in ISOLATED_TENANTS
@@ -109,11 +119,19 @@ def _isolated_mcp_servers(chat_id):
     """Single allowlist for isolated tenant MCP servers."""
     directory = os.environ.get("BRIDGE_ISOLATED_MCP_DIR", "/opt/telegram-ai/mcp")
     script = os.path.join(directory, "send_telegram_file_mcp.py")
+    servers = {}
     if not os.path.isfile(script):
         print(f"Isolated file MCP unavailable: {script}", flush=True)
-        return {}
-    return {"send-telegram-file": {"type": "stdio", "command": "/usr/bin/python3",
-                                   "args": [script], "env": {}}}
+    else:
+        servers["send-telegram-file"] = {"type": "stdio", "command": "/usr/bin/python3",
+                                         "args": [script], "env": {}}
+    delegate_script = os.path.join(directory, "delegate_to_codex_exchange_mcp.py")
+    if os.path.isfile(delegate_script) and codex_bridge_dir() is not None:
+        servers["delegate-to-codex"] = {"type": "stdio", "command": "/usr/bin/python3",
+                                        "args": [delegate_script], "env": {}}
+    else:
+        print("Isolated Codex delegation unavailable: MCP script or peer bridge missing", flush=True)
+    return servers
 
 
 def ensure_tenant_control(chat_id):
@@ -137,7 +155,7 @@ def ensure_tenant_control(chat_id):
     except (OSError, UnicodeError):
         was_default = False
     updated = content
-    if servers:
+    if "send-telegram-file" in servers:
         if FILE_SEND_AGENTS_MARKER not in content and not (
                 "CLAUDE_TELEGRAM_OUTBOX" in content and "send_telegram_file" in content):
             updated = content.rstrip() + "\n\n" + FILE_SEND_AGENTS_SECTION + "\n"
@@ -156,10 +174,11 @@ def ensure_tenant_control(chat_id):
 def stage_tenant_control(chat_id):
     """Restore the tenant-readable copies before each isolated Claude turn."""
     ensure_tenant_control(chat_id)
-    _, kind = tenant_identity(chat_id)
+    kind, _ = tenant_target(chat_id)
     exchange = ensure_tenant(chat_id, kind)["exchange"]
-    for source, name in ((tenant_persona_path(chat_id), "persona.md"),
-                         (tenant_mcp_path(chat_id), "mcp.json")):
+    suffix = ".delegate" if tenant_identity(chat_id)[1] == "delegate" else ""
+    for source, name in ((tenant_persona_path(chat_id), f"persona{suffix}.md"),
+                         (tenant_mcp_path(chat_id), f"mcp{suffix}.json")):
         with open(source, "rb") as handle:
             _atomic_control_write(os.path.join(exchange, name), handle.read(), 0o644)
     return exchange
@@ -167,6 +186,8 @@ def stage_tenant_control(chat_id):
 
 def ensure_tenant(chat_id, kind="main"):
     tenant_id, _ = tenant_identity(chat_id)
+    if tenant_isolated(chat_id):
+        kind = tenant_target(chat_id)[0]
     key = (tenant_id, kind)
     with _tenant_cache_lock:
         if key in _tenant_cache:
@@ -194,15 +215,18 @@ def ensure_tenant(chat_id, kind="main"):
 
 def tenant_run_argv(chat_id, kind, cwd="workspace", env=None, command="claude", args=()):
     tenant_id, _ = tenant_identity(chat_id)
-    ensure_tenant(tenant_id, kind)
+    product = "bridge"
+    if tenant_isolated(chat_id):
+        kind, product = tenant_target(chat_id)
+    ensure_tenant(chat_id, kind)
     if command == "claude" and tenant_isolated(chat_id):
-        control_key = f"delegate:{tenant_id}" if kind == "delegate" else tenant_id
-        exchange = stage_tenant_control(control_key)
-        args = ("--append-system-prompt-file", os.path.join(exchange, "persona.md"),
-                "--mcp-config", os.path.join(exchange, "mcp.json"),
+        exchange = stage_tenant_control(chat_id)
+        suffix = ".delegate" if tenant_identity(chat_id)[1] == "delegate" else ""
+        args = ("--append-system-prompt-file", os.path.join(exchange, f"persona{suffix}.md"),
+                "--mcp-config", os.path.join(exchange, f"mcp{suffix}.json"),
                 "--strict-mcp-config", *args)
     argv = ["sudo", "-n", BRIDGE_TENANT_RUN, tenant_id, "--kind", kind,
-            "--product", "bridge", "--cwd", cwd]
+            "--product", product, "--cwd", cwd]
     allowed = {"CHAT_ID", "INSTANCE_ID", "TOPIC_ID", "EXCLUDE_MSG_ID",
                "CLAUDE_TELEGRAM_OUTBOX", "MAX_THINKING_TOKENS"}
     for key, value in (env or {}).items():
@@ -681,8 +705,10 @@ def account_dir(chat_id, state_key=None):
     delegated = state_key is not None and str(state_key) != str(chat_id)
     if tenant_isolated(chat_id):
         # Provisioning owns this tree; the bridge must never write into it.
-        return (os.path.join(DELEGATED_ACCOUNTS_DIR, str(chat_id)) if delegated
-                else os.path.join(ACCOUNTS_DIR, str(chat_id)))
+        key = f"delegate:{chat_id}" if delegated else chat_id
+        kind, product = tenant_target(key)
+        home = ensure_tenant(key, kind)["home"]
+        return os.path.join(home, ".claude-delegate" if product == "delegate" else ".claude-bridge")
     if delegated:
         d = os.path.join(DELEGATED_ACCOUNTS_DIR, str(chat_id))
         os.makedirs(d, mode=0o700, exist_ok=True)
@@ -796,7 +822,7 @@ def _ensure_tenant_workspace_rules(tenant_dir, persona_path, control=False):
 
 def tenant_file_outbox(chat_id):
     if tenant_isolated(chat_id):
-        return os.path.join(ensure_tenant(chat_id, tenant_identity(chat_id)[1])["exchange"], "outbox")
+        return os.path.join(ensure_tenant(chat_id, tenant_target(chat_id)[0])["exchange"], "outbox")
     path = os.path.join(ACCOUNTS_DIR, str(chat_id), "outbox")
     os.makedirs(path, mode=0o700, exist_ok=True)
     return path

@@ -20,7 +20,7 @@ from runtime import (
     batch_timers, busy_chats, claude_env, draining, intake_active, intake_queues, intake_lock, load_whitelist,
     pending_batch_generations, pending_batches, pending_batches_lock, pending_logins,
     _write_default_persona_marker, TenantUnavailable, ensure_tenant,
-    tenant_identity, tenant_isolated, tenant_run_argv, tenant_tool_json,
+    tenant_target, tenant_isolated, tenant_run_argv, tenant_tool_json,
     tenant_persona_path, ensure_tenant_control,
 )
 from state_store import (
@@ -565,7 +565,7 @@ def _translate_persona_file(chat_id, target_lang, state):
         command.remove("--session-id")
         command.remove(session_id)
         command.append("--no-session-persistence")
-        command = tenant_run_argv(chat_id, tenant_identity(chat_id)[1],
+        command = tenant_run_argv(chat_id, tenant_target(chat_id)[0],
                                   args=command[1:])
     try:
         result = subprocess.run(
@@ -820,10 +820,8 @@ def handle_command(chat_id, text, state, offset=None):
             try:
                 main = tenant_tool_json(chat_id, "main", "list-sessions",
                                         cwd=get_workspace(state, chat_id))["sessions"]
-                # Delegate processes are an owner feature: do not provision a delegate user for other tenants.
-                delegate = (tenant_tool_json(chat_id, "delegate", "list-sessions",
-                                             cwd=get_workspace(state, delegate_process))["sessions"]
-                            if str(chat_id) == str(OWNER_ID) else [])
+                delegate = tenant_tool_json(delegate_process, tenant_target(delegate_process)[0],
+                                            "list-sessions", cwd=get_workspace(state, delegate_process))["sessions"]
                 matches = [(chat_id, item["id"]) for item in main if item["id"].lower().startswith(wanted)]
                 matches += [(delegate_process, item["id"]) for item in delegate if item["id"].lower().startswith(wanted)]
             except TenantUnavailable as exc:
@@ -1663,7 +1661,7 @@ def start_login(chat_id, state, delegated=False, jarvis=False):
     if isolated:
         forget_isolated_ready(chat_id)
         try:
-            ensure_tenant(chat_id, "delegate" if delegated else "main")
+            ensure_tenant(target_key, tenant_target(target_key)[0])
         except TenantUnavailable as exc:
             print(f"Tenant unavailable: {exc}", flush=True)
             send_message(chat_id, t('tenant_unavailable'))
@@ -1699,7 +1697,7 @@ def start_login(chat_id, state, delegated=False, jarvis=False):
     if config_dir:
         env["CLAUDE_CONFIG_DIR"] = config_dir
     if isolated:
-        command = tenant_run_argv(chat_id, "delegate" if delegated else "main",
+        command = tenant_run_argv(target_key, tenant_target(target_key)[0],
                                   command="claude", args=("auth", "login", "--claudeai"))
         shell_cmd = f"exec script -qefc {shlex.quote(shlex.join(command))} /dev/null 0<>{shlex.quote(fifo_path)}"
     else:
@@ -1811,8 +1809,8 @@ def feed_login_code(chat_id, code, state, login_key=None):
                 return
             try:
                 if info.get("isolated"):
-                    kind = "delegate" if info["delegated"] else "main"
-                    argv = tenant_run_argv(chat_id, kind, command="claude", args=("auth", "status"))
+                    key = info["state_key"]
+                    argv = tenant_run_argv(key, tenant_target(key)[0], command="claude", args=("auth", "status"))
                     r = subprocess.run(argv, cwd="/", env={"PATH": "/usr/bin:/bin"},
                                        capture_output=True, text=True, timeout=15)
                 else:

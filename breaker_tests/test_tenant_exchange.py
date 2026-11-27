@@ -98,6 +98,7 @@ def main():
 
     provision = lambda chat_id, kind="main": {"exchange": str(exchange), "home": str(TMP)}
     with patch.object(runtime, "ensure_tenant", side_effect=provision), \
+            patch.object(runtime, "codex_bridge_dir", return_value=None), \
             patch.object(runtime, "BRIDGE_ISOLATION", "on"), \
             patch.object(runtime, "ISOLATED_TENANTS", frozenset({tenant})), \
             patch.dict(os.environ, {"BRIDGE_ISOLATED_MCP_DIR": str(ROOT),

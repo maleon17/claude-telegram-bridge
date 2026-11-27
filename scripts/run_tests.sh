@@ -11,7 +11,8 @@ cd "$ROOT"
 
 python3 -m py_compile bridge.py runtime.py telegram_api.py state_store.py chat_process.py \
     handlers.py telegram_format.py bridge_exec.py send_telegram_file_mcp.py \
-    delegate_to_codex_mcp.py telegram_actions_link.py || exit 1
+    delegate_to_codex_mcp.py delegate_to_codex_exchange_mcp.py \
+    tenant_delegate_exchange.py telegram_actions_link.py || exit 1
 
 failed=0
 for test in breaker_tests/test_*.py; do

@@ -9,7 +9,7 @@ from strings import current_language, t
 
 from runtime import (
     ACCOUNTS_DIR, CLAUDE_BIN, COST_WARNING_USD, OWNER_ID, PROJECTS_DIR, RESTART_SIGNAL_FILE,
-    STATE_FILE, WORKDIR, claude_env, state_lock, tenant_isolated, tenant_identity,
+    STATE_FILE, WORKDIR, claude_env, state_lock, tenant_isolated, tenant_target,
     tenant_tool_json,
 )
 from telegram_api import send_message
@@ -386,7 +386,7 @@ def get_account_status(state, chat_id):
         key, now = str(chat_id), time.time()
         if now - _isolated_ready_at.get(key, 0) < ISOLATED_READY_TTL_S:
             return "ready"
-        _, kind = tenant_identity(chat_id)
+        kind, _ = tenant_target(chat_id)
         result = tenant_tool_json(chat_id, kind, "claude", ("auth", "status"))
         if result.get("loggedIn"):
             _isolated_ready_at[key] = now
@@ -493,7 +493,7 @@ def fetch_account_limits(config_dir=None, chat_id=None):
     "what's contributing" breakdown.
     """
     if chat_id is not None and tenant_isolated(chat_id):
-        _, kind = tenant_identity(chat_id)
+        kind, _ = tenant_target(chat_id)
         result = tenant_tool_json(chat_id, kind, "account-limits")
         headline = result.get("lines", [])
         return "\n".join(_localize_limit_line(line) for line in headline) if headline else t('state_store_fetch_account_limits_2')

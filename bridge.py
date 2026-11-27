@@ -37,6 +37,8 @@ from runtime import (
     TenantUnavailable, BRIDGE_ISOLATION, ISOLATED_TENANTS, ensure_tenant, tenant_isolated,
 )
 from tenant_exchange import process_tenant_queue
+from tenant_delegate_exchange import process_tenant_delegate_queue
+from delegate_to_codex_mcp import codex_bridge_dir
 from state_store import (
     _set_chat_language, clear_pending_prompt, get_account_status, get_pending_prompt,
     get_voice_language, load_state,
@@ -169,6 +171,19 @@ def _isolated_file_send_watcher_loop(tenant_id):
             process_tenant_queue(int(tenant_id), exchange, send_document, MAX_DOCUMENT_BYTES)
         except Exception as exc:
             print(f"Isolated file queue unavailable for tenant {tenant_id}: {type(exc).__name__}", flush=True)
+
+
+def _isolated_delegate_watcher_loop(tenant_id):
+    """Poll one main tenant without waiting for a delegated turn to finish."""
+    while True:
+        time.sleep(1.0)
+        if BRIDGE_ISOLATION != "on":
+            continue
+        try:
+            exchange = ensure_tenant(tenant_id, "main")["exchange"]
+            process_tenant_delegate_queue(tenant_id, exchange)
+        except Exception as exc:
+            print(f"Isolated delegation queue unavailable for tenant {tenant_id}: {type(exc).__name__}", flush=True)
 
 
 def _is_forwarded_message(msg):
@@ -927,10 +942,16 @@ def main():
     threading.Thread(target=_cross_delegate_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_file_send_watcher_loop, args=(state,), daemon=True).start()
     if BRIDGE_ISOLATION == "on" and ISOLATED_TENANTS:
+        delegate_script = os.path.join(os.environ.get("BRIDGE_ISOLATED_MCP_DIR", "/opt/telegram-ai/mcp"),
+                                       "delegate_to_codex_exchange_mcp.py")
+        delegation_ready = os.path.isfile(delegate_script) and codex_bridge_dir() is not None
         for tenant_id in ISOLATED_TENANTS:
             if tenant_id.isdecimal():
                 threading.Thread(target=_isolated_file_send_watcher_loop,
                                  args=(tenant_id,), daemon=True).start()
+                if delegation_ready:
+                    threading.Thread(target=_isolated_delegate_watcher_loop,
+                                     args=(tenant_id,), daemon=True).start()
     threading.Thread(target=_wakeup_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_chat_proc_idle_reaper_loop, daemon=True).start()
     threading.Thread(target=_pending_delivery_watcher_loop, args=(state,), daemon=True).start()

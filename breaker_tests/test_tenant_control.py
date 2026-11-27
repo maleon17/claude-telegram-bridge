@@ -111,7 +111,7 @@ def main():
                 assert owner_persona.read_text() == "Owner reply persona"
 
         assert not config.exists() and not owner_config.exists()
-        assert runtime.account_dir(tenant) == str(config)
+        assert runtime.account_dir(tenant) == str(config / ".claude-bridge")
         assert not config.exists()
 
 
