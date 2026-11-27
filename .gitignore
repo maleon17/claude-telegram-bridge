@@ -25,3 +25,4 @@ claude-telegram.service
 jarvis-ask/
 
 graphify-out/
+login/login_stdin_jarvis_*.fifo

@@ -69,6 +69,7 @@ The installer checks your bot token with Telegram, asks for your Telegram ID and
 | `/voicelang uk\|ru\|en\|auto` | Language for voice-message transcription |
 | `/persona` · `/persona reset` | Owner only: show or reset this chat's persona |
 | `/login` | Log in again (for example after the session expired) |
+| `/login jarvis` | Owner only: log in the ClaudeAsk worker account (default `~/.claude`; set `JARVIS_CLAUDE_CONFIG_DIR` to an absolute path to override) |
 | `/restart` · `/update` | Owner only: safe restart · tested update from Git and restart |
 
 ## Permission modes

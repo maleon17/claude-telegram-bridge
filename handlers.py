@@ -980,11 +980,17 @@ def handle_command(chat_id, text, state, offset=None):
         return True
 
     if cmd == "login":
-        if arg not in ("", "delegate"):
+        if arg not in ("", "delegate", "jarvis"):
             send_message(chat_id, t('handlers_handle_command_40'))
             return True
-        start_login(chat_id, state, delegated=(arg == "delegate"))
-        send_message(chat_id, t('handlers_handle_command_41'))
+        if arg == "jarvis" and str(chat_id) != str(OWNER_ID):
+            send_message(chat_id, t('handlers_login_jarvis_owner_only'))
+            return True
+        if arg == "jarvis":
+            start_login(chat_id, state, jarvis=True)
+        else:
+            start_login(chat_id, state, delegated=(arg == "delegate"))
+        send_message(chat_id, t('handlers_login_jarvis_started' if arg == "jarvis" else 'handlers_handle_command_41'))
         return True
 
     if cmd == "restart":
@@ -1448,6 +1454,7 @@ def dispatch_turn(
 
 
 LOGIN_TIMEOUT_S = 180
+JARVIS_LOGIN_TTL_S = 600
 
 
 def send_whitelist_prompt(chat_id):
@@ -1472,10 +1479,13 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
     tg_call("answerCallbackQuery", params)
 
 
-def _cleanup_login(chat_id, info, terminate=True):
+def _cleanup_login(login_key, info, terminate=True):
     """Stop one login attempt and remove only its private FIFO."""
-    if pending_logins.get(chat_id) is info:
-        pending_logins.pop(chat_id, None)
+    if pending_logins.get(login_key) is info:
+        pending_logins.pop(login_key, None)
+    timer = info.get("ttl_timer") if isinstance(info, dict) else None
+    if timer is not None:
+        timer.cancel()
     proc = info.get("proc") if isinstance(info, dict) else None
     if terminate and proc is not None and proc.poll() is None:
         proc.terminate()
@@ -1524,24 +1534,37 @@ def _login_url(line):
     return plain.group(0) if plain else None
 
 
-def start_login(chat_id, state, delegated=False):
+def start_login(chat_id, state, delegated=False, jarvis=False):
     """Start Claude's interactive OAuth flow and relay it through Telegram.
 
     Every chat logs into its isolated account directory. ``/login delegate``
-    authenticates the separate home used by delegated turns.
+    authenticates the separate home used by delegated turns. ``/login jarvis``
+    authenticates the owner's ClaudeAsk worker home.
     """
     _set_chat_language(state, chat_id)
+    login_key = f"jarvis:{chat_id}" if jarvis else chat_id
     target_key = delegate_key(chat_id) if delegated else chat_id
-    config_dir = account_dir(chat_id, state_key=target_key)
-    login_dir = config_dir or os.path.join(os.path.dirname(__file__), "login")
+    if jarvis:
+        override = os.environ.get("JARVIS_CLAUDE_CONFIG_DIR", "")
+        config_dir = override if override and os.path.isabs(override) else os.path.expanduser("~/.claude")
+    else:
+        config_dir = account_dir(chat_id, state_key=target_key)
+    login_dir = (os.path.join(os.path.dirname(__file__), "login") if jarvis
+                 else config_dir or os.path.join(os.path.dirname(__file__), "login"))
     os.makedirs(login_dir, mode=0o700, exist_ok=True)
-    fifo_path = os.path.join(login_dir, f"login_stdin_{chat_id}.fifo")
+    if jarvis:
+        os.chmod(login_dir, 0o700)
+    fifo_name = f"login_stdin_jarvis_{chat_id}.fifo" if jarvis else f"login_stdin_{chat_id}.fifo"
+    fifo_path = os.path.join(login_dir, fifo_name)
 
-    previous = pending_logins.pop(chat_id, None)
+    previous = pending_logins.pop(login_key, None)
     if previous:
-        old_proc = previous.get("proc")
-        if old_proc is not None and old_proc.poll() is None:
-            old_proc.terminate()
+        if jarvis:
+            _cleanup_login(login_key, previous)
+        else:
+            old_proc = previous.get("proc")
+            if old_proc is not None and old_proc.poll() is None:
+                old_proc.terminate()
     if os.path.exists(fifo_path):
         os.remove(fifo_path)
     os.mkfifo(fifo_path)
@@ -1561,8 +1584,11 @@ def start_login(chat_id, state, delegated=False):
         "proc": proc, "fifo": fifo_path, "config_dir": config_dir,
         "state_key": target_key, "delegated": delegated, "started_at": time.time(),
     }
-    pending_logins[chat_id] = info
-    set_account_status(state, target_key, "awaiting_code")
+    if jarvis:
+        info["jarvis"] = True
+    pending_logins[login_key] = info
+    if not jarvis:
+        set_account_status(state, target_key, "awaiting_code")
 
     def reader():
         _set_chat_language(state, chat_id)
@@ -1581,7 +1607,7 @@ def start_login(chat_id, state, delegated=False):
         try:
             for line in proc.stdout:
                 url = _login_url(line)
-                if url:
+                if url and (not jarvis or pending_logins.get(login_key) is info):
                     url_seen = True
                     send_message(
                         chat_id,
@@ -1596,6 +1622,17 @@ def start_login(chat_id, state, delegated=False):
                             "inline_keyboard": [[{"text": t('handlers_reader_2'), "url": url}]]
                         },
                     })
+                    if jarvis and pending_logins.get(login_key) is info:
+                        def expire():
+                            if pending_logins.get(login_key) is info:
+                                _cleanup_login(login_key, info)
+                                _set_chat_language(state, chat_id)
+                                send_message(chat_id, t('handlers_login_jarvis_expired'))
+
+                        timer = threading.Timer(JARVIS_LOGIN_TTL_S, expire)
+                        timer.daemon = True
+                        info["ttl_timer"] = timer
+                        timer.start()
                     break
                 if time.time() > deadline:
                     break
@@ -1603,16 +1640,18 @@ def start_login(chat_id, state, delegated=False):
             pass
         finally:
             watchdog.cancel()
-        if not url_seen and pending_logins.get(chat_id) is info:
-            set_account_status(state, target_key, "login_failed")
-            _cleanup_login(chat_id, info)
-            send_message(chat_id, t('handlers_reader_3'))
+        if not url_seen and pending_logins.get(login_key) is info:
+            if not jarvis:
+                set_account_status(state, target_key, "login_failed")
+            _cleanup_login(login_key, info)
+            send_message(chat_id, t('handlers_login_jarvis_start_failed' if jarvis else 'handlers_reader_3'))
 
     threading.Thread(target=reader, daemon=True).start()
 
 
-def feed_login_code(chat_id, code, state):
-    info = pending_logins.get(chat_id)
+def feed_login_code(chat_id, code, state, login_key=None):
+    login_key = chat_id if login_key is None else login_key
+    info = pending_logins.get(login_key)
     if not info:
         return False
     target_key = info["state_key"]
@@ -1620,16 +1659,19 @@ def feed_login_code(chat_id, code, state):
         with open(info["fifo"], "w") as f:
             f.write(code.strip() + "\n")
     except Exception:
-        if pending_logins.get(chat_id) is info:
-            set_account_status(state, target_key, "login_failed")
-            _cleanup_login(chat_id, info)
-        send_message(chat_id, t('handlers_feed_login_code_1'))
+        if pending_logins.get(login_key) is info:
+            if not info.get("jarvis"):
+                set_account_status(state, target_key, "login_failed")
+            _cleanup_login(login_key, info)
+        send_message(chat_id, t('handlers_login_jarvis_code_failed' if info.get("jarvis") else 'handlers_feed_login_code_1'))
         return False
 
     def check():
         _set_chat_language(state, chat_id)
         time.sleep(3)
         for _ in range(10):
+            if info.get("jarvis") and pending_logins.get(login_key) is not info:
+                return
             try:
                 r = subprocess.run(
                     [CLAUDE_BIN, "auth", "status"],
@@ -1637,8 +1679,12 @@ def feed_login_code(chat_id, code, state):
                     capture_output=True, text=True, timeout=15,
                 )
                 d = json.loads(r.stdout)
+                if info.get("jarvis") and pending_logins.get(login_key) is not info:
+                    return
                 if d.get("loggedIn") and _login_credentials_ready(info):
-                    if info["delegated"]:
+                    if info.get("jarvis"):
+                        success_message = t('handlers_login_jarvis_success')
+                    elif info["delegated"]:
                         set_account_status(state, target_key, "ready")
                         success_message = t('handlers_check_1')
                     elif str(chat_id) == str(OWNER_ID):
@@ -1667,20 +1713,26 @@ def feed_login_code(chat_id, code, state):
                         else:
                             set_account_status(state, target_key, "ready")
                             success_message = t('handlers_check_2')
-                    _cleanup_login(chat_id, info)
+                    _cleanup_login(login_key, info)
                     # A persistent Claude process may have cached the expired
                     # OAuth session.  Recreate it on the next prompt so the
                     # fresh credentials are definitely used.
-                    _stop_chat_process(target_key)
+                    if not info.get("jarvis"):
+                        _stop_chat_process(target_key)
                     send_message(chat_id, success_message)
                     return
             except Exception:
                 pass
             time.sleep(2)
-        if pending_logins.get(chat_id) is info:
-            set_account_status(state, target_key, "login_failed")
-            _cleanup_login(chat_id, info)
-        send_message(chat_id, t('handlers_check_4'))
+        if info.get("jarvis"):
+            if pending_logins.get(login_key) is info:
+                _cleanup_login(login_key, info)
+                send_message(chat_id, t('handlers_login_jarvis_verify_failed'))
+        else:
+            if pending_logins.get(login_key) is info:
+                set_account_status(state, target_key, "login_failed")
+                _cleanup_login(login_key, info)
+            send_message(chat_id, t('handlers_check_4'))
 
     threading.Thread(target=check, daemon=True).start()
     return True
@@ -1700,7 +1752,23 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
     if _handle_local_bot_api_setup_reply(chat_id, text or ""):
         return True
 
+    if text and re.fullmatch(r"[/\.]+login\s+jarvis\s*", text, re.IGNORECASE):
+        handle_command(chat_id, text, state)
+        return True
+
     active_login = pending_logins.get(chat_id)
+    jarvis_key = f"jarvis:{chat_id}"
+    jarvis_login = pending_logins.get(jarvis_key)
+    if jarvis_login:
+        if text and text.startswith(("/", ".")):
+            if [part.lower() for part in text.lstrip("/.").split()[:1]] == ["login"]:
+                handle_command(chat_id, text, state)
+                return True
+        elif text and re.fullmatch(r"\S{20,}", text):
+            feed_login_code(chat_id, text, state, login_key=jarvis_key)
+            return True
+        if get_account_status(state, chat_id) == "ready":
+            return False
     if active_login and active_login.get("delegated"):
         if text and text.strip().lower().lstrip("/.").split()[0:1] == ["login"]:
             start_login(chat_id, state, delegated=True)
