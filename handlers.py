@@ -21,6 +21,7 @@ from runtime import (
     pending_batch_generations, pending_batches, pending_batches_lock, pending_logins,
     _write_default_persona_marker, TenantUnavailable, ensure_tenant,
     tenant_identity, tenant_isolated, tenant_run_argv, tenant_tool_json,
+    tenant_persona_path, ensure_tenant_control,
 )
 from state_store import (
     _set_chat_language, clear_pending_prompt, clear_session, delegate_key, fetch_account_limits,
@@ -482,11 +483,17 @@ def _handle_local_bot_api_setup_reply(chat_id, text):
 
 
 def _persona_path(chat_id):
+    if tenant_isolated(chat_id):
+        ensure_tenant_control(chat_id)
+        return tenant_persona_path(chat_id)
     return os.path.join(account_dir(chat_id), "CLAUDE.md")
 
 
 def _language_persona_path(chat_id):
     """Read an existing persona without account_dir's legacy instruction append."""
+    if tenant_isolated(chat_id):
+        ensure_tenant_control(chat_id)
+        return tenant_persona_path(chat_id)
     path = os.path.join(ACCOUNTS_DIR, str(chat_id), "CLAUDE.md")
     if not os.path.exists(path):
         account_dir(chat_id)
@@ -552,10 +559,19 @@ def _translate_persona_file(chat_id, target_lang, state):
     model = get_model(state, chat_id)
     if model:
         command.extend(("--model", model))
+    isolated = tenant_isolated(chat_id)
+    if isolated:
+        command.remove("--strict-mcp-config")
+        command.remove("--session-id")
+        command.remove(session_id)
+        command.append("--no-session-persistence")
+        command = tenant_run_argv(chat_id, tenant_identity(chat_id)[1],
+                                  args=command[1:])
     try:
         result = subprocess.run(
             command, input=prompt, capture_output=True, text=True,
-            timeout=180, check=False, cwd=tenant_dir, env=claude_env(tenant_dir),
+            timeout=180, check=False, cwd="/" if isolated else tenant_dir,
+            env={"PATH": "/usr/bin:/bin"} if isolated else claude_env(tenant_dir),
         )
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout or "Claude failed").strip()[-500:])
@@ -563,11 +579,12 @@ def _translate_persona_file(chat_id, target_lang, state):
     finally:
         # Claude can choose its own sanitized project directory. The UUID is
         # unique to this invocation; never remove another session's file.
-        for session_path in glob.glob(
-            os.path.join(tenant_dir, "projects", "**", f"{session_id}.jsonl"),
-            recursive=True,
-        ):
-            os.unlink(session_path)
+        if not isolated:
+            for session_path in glob.glob(
+                os.path.join(tenant_dir, "projects", "**", f"{session_id}.jsonl"),
+                recursive=True,
+            ):
+                os.unlink(session_path)
     refusal = re.match(r"(?i)^(?:sorry|i cannot|i can't|unable to)\b", translated)
     original_has_headings = any(line.startswith("#") for line in original.splitlines())
     translated_has_headings = any(line.startswith("#") for line in translated.splitlines())
@@ -1829,14 +1846,13 @@ def feed_login_code(chat_id, code, state, login_key=None):
                         # so that's the real signal, not "is this the first
                         # login ever" (caught live 2026-10-09: every non-owner
                         # tenant got re-asked their name on every re-login).
-                        needs_name = False if info.get("isolated") else True
-                        if not info.get("isolated"):
-                            persona_path = _persona_path(chat_id)
-                            try:
-                                with open(persona_path, encoding="utf-8") as f:
-                                    needs_name = "<user>" in f.read()
-                            except FileNotFoundError:
-                                pass
+                        needs_name = True
+                        persona_path = _persona_path(chat_id)  # the control-zone file for isolated tenants
+                        try:
+                            with open(persona_path, encoding="utf-8") as f:
+                                needs_name = "<user>" in f.read()
+                        except FileNotFoundError:
+                            pass
                         if needs_name:
                             set_account_status(state, target_key, "awaiting_display_name")
                             success_message = t('handlers_check_3')
@@ -1942,9 +1958,11 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
         return True
 
     elif status == "awaiting_display_name":
-        tenant_dir = account_dir(chat_id)
+        tenant_dir = (os.path.dirname(_persona_path(chat_id)) if tenant_isolated(chat_id)
+                      else account_dir(chat_id))
         if tenant_dir:
-            claude_md = os.path.join(tenant_dir, "CLAUDE.md")
+            claude_md = (_persona_path(chat_id) if tenant_isolated(chat_id)
+                         else os.path.join(tenant_dir, "CLAUDE.md"))
             if os.path.exists(claude_md):
                 was_default = _persona_is_default(chat_id)
                 with open(claude_md, encoding="utf-8") as f:

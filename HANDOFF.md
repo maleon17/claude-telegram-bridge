@@ -112,9 +112,9 @@ process, not independently runnable components.
 
 ## Self-modification and persona
 
-Nothing the bridge injects overrides Claude Code's own system prompt. Each chat
-runs the normal default prompt plus whatever `CLAUDE.md` / memory files apply
-for that chat's `CLAUDE_CONFIG_DIR`. To give the bridged assistant a
+Nothing the bridge injects overrides Claude Code's own system prompt. Each
+non-isolated chat runs the normal default prompt plus whatever `CLAUDE.md` /
+memory files apply for that chat's `CLAUDE_CONFIG_DIR`. To give the bridged assistant a
 personality or house rules, drop a `CLAUDE.md` into its config dir or its
 workspace — see `personality.example.md` in this repo for a starting point.
 
@@ -135,6 +135,11 @@ provisioning failure blocks the turn. The bridge calls tenant-side tools for
 session listings and account limits. This integration needs separately installed
 helpers and tools; the public installer does not yet provide isolation setup.
 The legacy background wakeup signal is unavailable in isolated processes.
+For isolated tenants, the bridge stores the persona and an empty MCP server
+configuration under `tenant_control/`, then restores readable copies to the
+tenant exchange before each Claude launch. Claude receives them through
+`--append-system-prompt-file`, `--mcp-config`, and `--strict-mcp-config`.
+The bridge does not write `CLAUDE.md` or `.claude.json` in their config dirs.
 
 Every tenant's persona also carries a short workspace rule (`WORKSPACE_RULES`
 in `runtime.py`, appended once in the persona's language): work inside the
@@ -142,7 +147,7 @@ tenant's own working folder rather than the home directory, and move the
 tenant's own project files there when they are found lying in home.
 
 `/language en|ru|uk|kk|de` stores an interface language per chat, updates that
-chat's Telegram command menu, and changes its `CLAUDE.md` persona. Bot-authored
+chat's Telegram command menu, and changes its persona. Bot-authored
 messages are translated through `strings.py`; customized personas stay isolated
 and are translated without being shared with other tenants.
 

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 TMP = Path(tempfile.mkdtemp(prefix="bridge_isolation_"))
+os.environ["BRIDGE_TENANT_CONTROL_DIR"] = str(TMP / "control")
 os.environ.update(TELEGRAM_BOT_TOKEN="fake", OWNER_ID="1000000001",
                   BRIDGE_STATE_FILE=str(TMP / "state.json"), BRIDGE_ISOLATION="off")
 sys.path.insert(0, str(ROOT))
@@ -95,7 +96,11 @@ def main():
         assert "DISABLE_FOO=1" in forwarded_argv
         with patch.object(runtime.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, '{"loggedIn": true}', "")) as status_run:
             assert state_store.get_account_status({}, tenant) == "ready"
-            assert status_run.call_args.args[0][-3:] == ["claude", "auth", "status"]
+            assert status_run.call_args.args[0][-8:] == [
+                "claude", "--append-system-prompt-file", str(exchange / "persona.md"),
+                "--mcp-config", str(exchange / "mcp.json"), "--strict-mcp-config",
+                "auth", "status",
+            ]
             assert str(runner) in status_run.call_args.args[0]
         state_store.forget_isolated_ready(tenant)
         with patch.object(runtime.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, '{"loggedIn": false}', "")):

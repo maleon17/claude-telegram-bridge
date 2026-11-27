@@ -14,6 +14,8 @@ import urllib.error
 import uuid
 import glob
 import hashlib
+import stat
+import tempfile
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +55,87 @@ def tenant_isolated(chat_id):
     return BRIDGE_ISOLATION == "on" and tenant_id in ISOLATED_TENANTS
 
 
+def tenant_control_dir(chat_id):
+    tenant_id, kind = tenant_identity(chat_id)
+    if not tenant_id.isdecimal():
+        raise ValueError("invalid tenant id")
+    root = os.environ.get("BRIDGE_TENANT_CONTROL_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tenant_control")
+    base = os.path.join(root, tenant_id)
+    directory = os.path.join(base, "delegate") if kind == "delegate" else base
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(root, 0o700)
+    os.chmod(base, 0o700)
+    os.chmod(directory, 0o700)
+    return directory
+
+
+def tenant_persona_path(chat_id):
+    return os.path.join(tenant_control_dir(chat_id), "persona.md")
+
+
+def tenant_mcp_path(chat_id):
+    return os.path.join(tenant_control_dir(chat_id), "mcp.json")
+
+
+def _atomic_control_write(path, contents, mode):
+    """Replace a control or exchange file only when its bytes or mode differ."""
+    # The target may be a file the tenant controls (the exchange copy): never block on a FIFO, never follow a
+    # link, and never read more than the expected size into memory.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (stat.S_ISREG(info.st_mode) and info.st_size == len(contents)
+                    and hashlib.sha256(handle.read(len(contents) + 1)).digest() == hashlib.sha256(contents).digest()):
+                if stat.S_IMODE(info.st_mode) != mode:
+                    os.fchmod(handle.fileno(), mode)
+                return
+    except (FileNotFoundError, OSError):
+        pass
+    fd, temporary = tempfile.mkstemp(prefix=".bridge-control-", dir=os.path.dirname(path))
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _isolated_mcp_servers(chat_id):
+    """Single allowlist for isolated tenant MCP servers; I5 can extend it."""
+    return {}
+
+
+def ensure_tenant_control(chat_id):
+    persona = tenant_persona_path(chat_id)
+    if not os.path.exists(persona):
+        source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "personality.example.md")
+        with open(source, "rb") as handle:
+            contents = handle.read()
+        _atomic_control_write(persona, contents, 0o600)
+        _write_default_persona_marker(tenant_control_dir(chat_id), contents)
+    _ensure_tenant_workspace_rules(tenant_control_dir(chat_id), persona, control=True)
+    mcp = (json.dumps({"mcpServers": _isolated_mcp_servers(chat_id)},
+                      ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    _atomic_control_write(tenant_mcp_path(chat_id), mcp, 0o600)
+
+
+def stage_tenant_control(chat_id):
+    """Restore the tenant-readable copies before each isolated Claude turn."""
+    ensure_tenant_control(chat_id)
+    _, kind = tenant_identity(chat_id)
+    exchange = ensure_tenant(chat_id, kind)["exchange"]
+    for source, name in ((tenant_persona_path(chat_id), "persona.md"),
+                         (tenant_mcp_path(chat_id), "mcp.json")):
+        with open(source, "rb") as handle:
+            _atomic_control_write(os.path.join(exchange, name), handle.read(), 0o644)
+    return exchange
+
+
 def ensure_tenant(chat_id, kind="main"):
     tenant_id, _ = tenant_identity(chat_id)
     key = (tenant_id, kind)
@@ -83,6 +166,12 @@ def ensure_tenant(chat_id, kind="main"):
 def tenant_run_argv(chat_id, kind, cwd="workspace", env=None, command="claude", args=()):
     tenant_id, _ = tenant_identity(chat_id)
     ensure_tenant(tenant_id, kind)
+    if command == "claude" and tenant_isolated(chat_id):
+        control_key = f"delegate:{tenant_id}" if kind == "delegate" else tenant_id
+        exchange = stage_tenant_control(control_key)
+        args = ("--append-system-prompt-file", os.path.join(exchange, "persona.md"),
+                "--mcp-config", os.path.join(exchange, "mcp.json"),
+                "--strict-mcp-config", *args)
     argv = ["sudo", "-n", BRIDGE_TENANT_RUN, tenant_id, "--kind", kind,
             "--product", "bridge", "--cwd", cwd]
     allowed = {"CHAT_ID", "INSTANCE_ID", "TOPIC_ID", "EXCLUDE_MSG_ID",
@@ -538,6 +627,9 @@ def _ensure_tenant_mcp_config(config_dir, chat_id=None):
 
 
 def ensure_owner_mcp_config():
+    if tenant_isolated(OWNER_ID):
+        ensure_tenant_control(OWNER_ID)
+        return
     _ensure_tenant_mcp_config(account_dir(OWNER_ID))
 
 
@@ -558,6 +650,10 @@ def _migrate_owner_projects(owner_dir):
 
 def account_dir(chat_id, state_key=None):
     delegated = state_key is not None and str(state_key) != str(chat_id)
+    if tenant_isolated(chat_id):
+        # Provisioning owns this tree; the bridge must never write into it.
+        return (os.path.join(DELEGATED_ACCOUNTS_DIR, str(chat_id)) if delegated
+                else os.path.join(ACCOUNTS_DIR, str(chat_id)))
     if delegated:
         d = os.path.join(DELEGATED_ACCOUNTS_DIR, str(chat_id))
         os.makedirs(d, mode=0o700, exist_ok=True)
@@ -620,7 +716,7 @@ def _write_default_persona_marker(tenant_dir, contents):
             os.unlink(temporary)
 
 
-def _ensure_tenant_workspace_rules(tenant_dir, persona_path):
+def _ensure_tenant_workspace_rules(tenant_dir, persona_path, control=False):
     """Append the working-folder guidance to an existing persona, exactly once.
 
     New tenants get it from the stock persona; this reaches the ones created
@@ -661,9 +757,12 @@ def _ensure_tenant_workspace_rules(tenant_dir, persona_path):
                 os.unlink(temporary)
         if was_default:
             _write_default_persona_marker(tenant_dir, updated.encode("utf-8"))
-    with open(flag, "w", encoding="ascii"):
-        pass
-    os.chmod(flag, 0o600)
+    if control:
+        _atomic_control_write(flag, b"", 0o600)
+    else:
+        with open(flag, "w", encoding="ascii"):
+            pass
+        os.chmod(flag, 0o600)
 
 
 def tenant_file_outbox(chat_id):

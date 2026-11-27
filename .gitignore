@@ -12,6 +12,7 @@ cross_delegate_queue/
 cross_delegate_result/
 whitelist.txt
 accounts/
+tenant_control/
 uploads_*/
 __pycache__/
 .venv/

@@ -89,7 +89,7 @@ Put their numeric Telegram IDs into `whitelist.txt` (one per line or comma-separ
 
 Every chat lives in `accounts/<chat_id>/`. On your own first use, your existing persona (`~/.claude/CLAUDE.md`), MCP servers and past sessions are copied in — your credentials are not. Removing an ID blocks new messages; their data stays on disk until you delete it.
 
-> **Security:** all users share the service's Linux user, and `bypass` gives Claude everything that user can do. Whitelist only people you trust; use separate Linux users or containers if you need hard isolation.
+> **Security:** by default, all users share the service's Linux user, and `bypass` gives Claude everything that user can do. Whitelist only people you trust; use separate Linux users or containers if you need hard isolation.
 
 ## Tenant isolation (optional)
 
@@ -97,7 +97,7 @@ Set `BRIDGE_ISOLATION=on` and `ISOLATED_TENANTS=<comma-separated Telegram IDs>` 
 
 This mode requires installed root-owned `tenant-provision` and `tenant-run` helpers, their sudo rules, and the root-owned `account-limits` and `list-sessions` tools under `/opt/telegram-ai/tools/`. The installer mode for isolation has not been published yet, so a normal `setup.sh` installation cannot enable it by itself. If provisioning fails, the selected chat cannot start a turn. Its `/workspace` is limited to its own `workspace/` and stored as a relative path.
 
-Known limits: `WAKEUP_SIGNAL_DIR` is not passed into isolated processes, so background commands cannot self-report through that legacy signal path until a separate task. Tenant persona/MCP configuration and file exchange remain outside this step of isolation integration; keep the mode restricted to staged tenants until those parts are integrated.
+For isolated tenants, the bridge keeps persona and MCP configuration in its `tenant_control/` directory (override with `BRIDGE_TENANT_CONTROL_DIR`) and restores readable copies in the tenant exchange before each Claude launch. It passes those copies through `--append-system-prompt-file`, `--mcp-config`, and `--strict-mcp-config`. The isolated MCP server list is currently empty. `WAKEUP_SIGNAL_DIR` is not passed into isolated processes, so background commands cannot self-report through that legacy signal path yet. File exchange for attachments remains outside this step; keep the mode restricted to staged tenants until that work is integrated.
 
 ## Together with the rest of Telegram AI
 
