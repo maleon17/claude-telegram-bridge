@@ -9,7 +9,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
-PEOPLE_FILE = os.environ.get("BRIDGE_PEOPLE_FILE", "/var/lib/telegram-ai/people.json")
+PEOPLE_FILE = os.environ.get("BRIDGE_PEOPLE_FILE", "/var/lib/telegram-people/people.json")
 ROLE_HELPER = "/usr/local/sbin/tenant-role"
 _cache = None
 _cache_key = None

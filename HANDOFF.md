@@ -126,7 +126,7 @@ personality or house rules, drop a `CLAUDE.md` into its config dir or its
 workspace — see `personality.example.md` in this repo for a starting point.
 
 Multi-tenancy: `people.py` reads the shared `people.json` registry (default
-`/var/lib/telegram-ai/people.json`, overridable with `BRIDGE_PEOPLE_FILE`).
+`/var/lib/telegram-people/people.json`, overridable with `BRIDGE_PEOPLE_FILE`).
 It stores version 1 and records with `added`, `added_by`, `note`, `enabled`,
 and `rejected_until`. Missing registries import valid IDs from the existing
 `whitelist.txt` without changing it. The owner is always allowed. The owner
