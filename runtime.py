@@ -186,7 +186,8 @@ def stage_tenant_control(chat_id):
     """Restore the tenant-readable copies before each isolated Claude turn."""
     ensure_tenant_control(chat_id)
     kind, _ = tenant_target(chat_id)
-    exchange = ensure_tenant(chat_id, kind)["exchange"]
+    info = ensure_tenant(chat_id, kind)
+    exchange, role = info["exchange"], info.get("role", "member")
     suffix = ".delegate" if tenant_identity(chat_id)[1] == "delegate" else ""
     for source, name in ((tenant_persona_path(chat_id), f"persona{suffix}.md"),
                          (tenant_mcp_path(chat_id), f"mcp{suffix}.json")):
@@ -194,7 +195,7 @@ def stage_tenant_control(chat_id):
             data = handle.read()
         if name.startswith("persona"):
             # The fixed runtime note is added to the staged copy only, never to the stored persona.
-            data = with_isolation_note(data.decode("utf-8")).encode("utf-8")
+            data = with_isolation_note(data.decode("utf-8"), role).encode("utf-8")
         _atomic_control_write(os.path.join(exchange, name), data, 0o644)
     return exchange
 
@@ -454,11 +455,24 @@ ISOLATION_NOTE = """
 """.strip()
 
 
-def with_isolation_note(text):
-    """Persona text as the isolated agent sees it: the stored persona plus the fixed runtime note."""
-    if ISOLATION_NOTE in text:
+ADMIN_ISOLATION_NOTE = """
+## Среда выполнения
+
+Ты работаешь как администратор сервера под отдельным пользователем с `sudo` без пароля.
+Серверные операции (перезапуск служб, чтение журналов, установка пакетов) выполняй через
+`sudo` осознанно: сначала выясни, что именно изменится, и не делай разрушающих действий
+без явной просьбы пользователя. Домашняя папка основного пользователя сервера и файлы
+других тенантов закрыты обычными правами: заходи туда через `sudo` и только когда этого
+требует задача.
+""".strip()
+
+
+def with_isolation_note(text, role="member"):
+    """Persona text as the isolated agent sees it: the stored persona plus the fixed runtime note for its role."""
+    note = ADMIN_ISOLATION_NOTE if role == "admin" else ISOLATION_NOTE
+    if note in text:
         return text
-    return text.rstrip() + "\n\n" + ISOLATION_NOTE + "\n"
+    return text.rstrip() + "\n\n" + note + "\n"
 
 
 FILE_SEND_AGENTS_MARKER = "## Отправка файлов в Telegram"
