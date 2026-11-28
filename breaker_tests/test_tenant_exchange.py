@@ -44,6 +44,15 @@ def main():
         assert not path.exists()
         return json.loads((exchange / "result" / name).read_text())
 
+    # Delegation requests share this queue: the file-send watcher must leave them to the delegation broker
+    # (a refusal written under the same name would be returned to the caller instead of the real answer).
+    for prefix in ("delegate-codex-", "delegate-claude-", "delegate-"):
+        delegated = exchange / "queue" / f"{prefix}{uuid.uuid4()}.json"
+        delegated.write_text(json.dumps({"text": "task"}))
+        exchange_io.process_tenant_queue(int(tenant), str(exchange), send, 32)
+        assert delegated.exists() and not (exchange / "result" / delegated.name).exists(), prefix
+        delegated.unlink()
+
     good = request({"path": str(payload), "caption": "hello", "chat_id": int(other)})
     assert good == {"done": True, "ok": True, "text": "Файл отправлен."}
     assert calls[-1][:3] == (int(tenant), "safe content", "hello")

@@ -14,7 +14,7 @@ REQUESTS_PER_TENANT_PASS = 4
 UUID_JSON = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.json$")
 # Both bridge watchers read the same queue/ directory: each takes only its own request names and leaves the
 # other's alone. Names matching neither pattern are junk and are refused by whoever sees them first.
-DELEGATE_JSON = re.compile(r"^delegate-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.json$")
+DELEGATE_JSON = re.compile(r"^delegate-(?:(?:codex|claude)-)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.json$")
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
