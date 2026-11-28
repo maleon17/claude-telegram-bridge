@@ -7,11 +7,13 @@ import stat
 import threading
 
 from delegate_to_codex_mcp import _delegate_request
-from tenant_exchange import (ExchangeRefusal, FILE_FLAGS, REQUEST_MAX_BYTES, UUID_JSON,
+from tenant_exchange import (ExchangeRefusal, FILE_FLAGS, REQUEST_MAX_BYTES,
                              _unique_object, _write_result, open_exchange_dir)
 
 
-NAME_RE = re.compile(r"delegate-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.json\Z")
+# Direction is part of the name: this bridge forwards only requests addressed to Codex.
+NAME_PREFIX = "delegate-codex-"
+NAME_RE = re.compile(r"delegate-codex-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.json\Z")
 MAX_WORKERS = 8
 _slots = threading.BoundedSemaphore(MAX_WORKERS)
 _active = set()
@@ -90,8 +92,8 @@ def process_tenant_delegate_queue(tenant_id, exchange):
             with os.scandir(queue_fd) as entries:
                 names = []
                 for entry in entries:
-                    # Plain <uuid>.json names belong to the file-send watcher.
-                    if entry.name.endswith(".json") and not UUID_JSON.fullmatch(entry.name):
+                    # Plain <uuid>.json names belong to the file-send watcher, delegate-claude-* to the Codex bridge.
+                    if entry.name.startswith(NAME_PREFIX) and entry.name.endswith(".json"):
                         names.append(entry.name)
                         if len(names) >= 16:
                             break

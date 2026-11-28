@@ -55,7 +55,7 @@ def main():
             assert set(runtime._isolated_mcp_servers(tenant)) == {"send-telegram-file"}
 
     def put(body, name=None):
-        name = name or f"delegate-{uuid.uuid4()}.json"
+        name = name or f"delegate-codex-{uuid.uuid4()}.json"
         path = exchange / "queue" / name
         path.write_bytes(body if isinstance(body, bytes) else json.dumps(body).encode())
         return name, path
@@ -110,18 +110,25 @@ def main():
             broker.process_tenant_delegate_queue(tenant, str(exchange))
             assert json.loads((exchange / "result" / name).read_text())["ok"] is False
             assert not path.exists()
-        name, path = put({"text": "ok"}, "delegate-bad.json")
+        name, path = put({"text": "ok"}, "delegate-codex-bad.json")
         broker.process_tenant_delegate_queue(tenant, str(exchange))
         assert json.loads((exchange / "result" / name).read_text())["ok"] is False
         assert not path.exists()
+        # Requests addressed to the Claude side (written by the Codex bridge's tool) must stay untouched:
+        # otherwise both bridges forward the same file and the task runs twice.
+        other, other_path = put({"text": "for claude"}, f"delegate-claude-{uuid.uuid4()}.json")
+        with patch.object(broker, "_delegate_request", side_effect=AssertionError("forwarded a delegate-claude request")):
+            broker.process_tenant_delegate_queue(tenant, str(exchange))
+        assert other_path.exists() and not (exchange / "result" / other).exists()
+        other_path.unlink()
         outside = TMP / "outside"
         outside.write_text("secret")
-        name = f"delegate-{uuid.uuid4()}.json"
+        name = f"delegate-codex-{uuid.uuid4()}.json"
         (exchange / "queue" / name).symlink_to(outside)
         broker.process_tenant_delegate_queue(tenant, str(exchange))
         assert outside.read_text() == "secret"
         assert json.loads((exchange / "result" / name).read_text())["ok"] is False
-        name = f"delegate-{uuid.uuid4()}.json"
+        name = f"delegate-codex-{uuid.uuid4()}.json"
         os.mkfifo(exchange / "queue" / name)
         broker.process_tenant_delegate_queue(tenant, str(exchange))
         assert json.loads((exchange / "result" / name).read_text())["ok"] is False
@@ -158,7 +165,7 @@ def main():
     with patch.dict(os.environ, {"TENANT_EXCHANGE_DIR": str(exchange)}):
         request_id = str(uuid.uuid4())
         mcp._write_request(str(exchange), request_id, "hello")
-        name = f"delegate-{request_id}.json"
+        name = f"delegate-codex-{request_id}.json"
         assert json.loads((exchange / "queue" / name).read_text()) == {"text": "hello"}
         (exchange / "queue" / name).unlink()
         with patch.object(mcp, "POLL_INTERVAL_S", 0.01):
@@ -191,19 +198,19 @@ def watchers_do_not_eat_each_other():
     file_id, delegate_id, junk = str(uuid.uuid4()), str(uuid.uuid4()), "junk.json"
     (exchange / "queue" / f"{file_id}.json").write_text(json.dumps(
         {"path": str(exchange / "outbox" / "f.txt"), "caption": "c"}))
-    (exchange / "queue" / f"delegate-{delegate_id}.json").write_text(json.dumps({"text": "task"}))
+    (exchange / "queue" / f"delegate-codex-{delegate_id}.json").write_text(json.dumps({"text": "task"}))
     (exchange / "queue" / junk).write_text("{}")
     sent = []
     with patch.object(broker, "_delegate_request", return_value=(True, "answered")):
         broker.process_tenant_delegate_queue("111111", str(exchange))
         for _ in range(100):
-            if (exchange / "result" / f"delegate-{delegate_id}.json").exists():
+            if (exchange / "result" / f"delegate-codex-{delegate_id}.json").exists():
                 break
             time.sleep(0.05)
         files.process_tenant_queue(111111, str(exchange),
                                    lambda chat, path, caption: (sent.append(os.path.basename(path)), {"ok": True})[1], 10**6)
     assert sent == ["f.txt"], sent
-    delegate_result = json.loads((exchange / "result" / f"delegate-{delegate_id}.json").read_text())
+    delegate_result = json.loads((exchange / "result" / f"delegate-codex-{delegate_id}.json").read_text())
     file_result = json.loads((exchange / "result" / f"{file_id}.json").read_text())
     assert delegate_result["ok"] is True and delegate_result["text"] == "answered"
     assert file_result["ok"] is True

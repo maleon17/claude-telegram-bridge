@@ -40,7 +40,11 @@ format in telegram-ai-core's README). There is no import-level coupling.
   through their account config; it writes to the Codex bridge's
   `cross_delegate_queue/`. Isolated tenants get the exchange MCP when its
   script is installed; the bridge forwards its requests from `.exchange/` to
-  that peer queue using the tenant directory as identity. The Codex bridge
+  that peer queue using the tenant directory as identity. The direction is part
+  of the request file name (`delegate-codex-<uuid>.json` here,
+  `delegate-claude-<uuid>.json` from the Codex bridge's tool) and each bridge
+  forwards only its own prefix; both bridges share one `queue/`, so otherwise
+  every task would run on both sides. The Codex bridge
   accepts a request only for a whitelisted id whose own account is `ready`,
   runs it in that person's isolated delegate runtime, posts the answer in its
   own chat and writes it where the acceptance said; the tool waits for that
