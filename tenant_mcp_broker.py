@@ -51,6 +51,27 @@ def server_definitions():
         return {}
 
 
+def direct_definition(definition):
+    """A server an administrator tenant runs itself, without the broker: a validated copy, or None."""
+    if not isinstance(definition, dict):
+        return None
+
+    def strings(value):
+        return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+
+    kind = definition.get("type")
+    if kind == "stdio":
+        command, args, env = definition.get("command"), definition.get("args", []), definition.get("env", {})
+        if (isinstance(command, str) and command.startswith("/") and isinstance(args, list)
+                and all(isinstance(a, str) for a in args) and strings(env)):
+            return {"type": "stdio", "command": command, "args": list(args), "env": dict(env)}
+    elif kind == "http":
+        url, headers = definition.get("url"), definition.get("headers", {})
+        if isinstance(url, str) and url.startswith(("http://", "https://")) and strings(headers):
+            return {"type": "http", "url": url, **({"headers": dict(headers)} if headers else {})}
+    return None
+
+
 def tenant_grants(tenant_id):
     if not str(tenant_id).isdecimal():
         return {}

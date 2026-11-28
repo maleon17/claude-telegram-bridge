@@ -132,16 +132,25 @@ def _isolated_mcp_servers(chat_id):
     else:
         print("Isolated Codex delegation unavailable: MCP script or peer bridge missing", flush=True)
     broker_script = os.path.join(directory, "brokered_mcp_exchange_mcp.py")
-    if os.path.isfile(broker_script):
-        from tenant_mcp_broker import server_definitions, tenant_grants, SERVER_RE
-        tenant_id, _ = tenant_identity(chat_id)
+    from tenant_mcp_broker import server_definitions, tenant_grants, direct_definition, SERVER_RE
+    tenant_id, _ = tenant_identity(chat_id)
+    grants = tenant_grants(tenant_id)
+    if grants:
         definitions = server_definitions()
-        exchange = ensure_tenant(chat_id, tenant_target(chat_id)[0])["exchange"]
-        for name in tenant_grants(tenant_id):
-            if isinstance(name, str) and SERVER_RE.fullmatch(name) and name in definitions and name not in servers:
-                servers[name] = {"type": "stdio", "command": "/usr/bin/python3",
-                                 "args": [broker_script],
-                                 "env": {"BROKERED_SERVER": name, "TENANT_EXCHANGE_DIR": exchange}}
+        info = ensure_tenant(chat_id, tenant_target(chat_id)[0])
+        admin = info.get("role") == "admin"
+        for name, grant in grants.items():
+            if not (isinstance(name, str) and SERVER_RE.fullmatch(name) and name in definitions and name not in servers):
+                continue
+            if isinstance(grant, dict) and grant.get("direct") is True:
+                # Administrators only: the server runs inside the tenant itself (own network and secrets, e.g. a
+                # phone-control MCP that returns screenshots), so it is not proxied through the bridge.
+                direct = direct_definition(definitions[name]) if admin else None
+                if direct:
+                    servers[name] = direct
+            elif os.path.isfile(broker_script):
+                servers[name] = {"type": "stdio", "command": "/usr/bin/python3", "args": [broker_script],
+                                 "env": {"BROKERED_SERVER": name, "TENANT_EXCHANGE_DIR": info["exchange"]}}
     return servers
 
 
