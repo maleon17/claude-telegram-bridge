@@ -178,6 +178,39 @@ def set_note(value, note):
     _mutate(change)
 
 
+def set_profile(value, name="", username=""):
+    """Remember the Telegram display name and @username of a registered person.
+    Writes only when something changed; unknown people and read-only registries are ignored."""
+    if not _valid_id(value):
+        return False
+    value = str(value)
+    name = str(name or "").strip()
+    username = str(username or "").strip().lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,64}", username or "a_b"):
+        username = ""
+    try:
+        record = load()["people"].get(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    if record is None or not record.get("enabled"):
+        return False
+    new_note = record.get("note") or name
+    new_user = username or record.get("username", "")
+    if new_note == record.get("note", "") and new_user == record.get("username", ""):
+        return False
+    def change(data):
+        entry = data["people"].get(value)
+        if entry is not None:
+            entry["note"] = new_note
+            if new_user:
+                entry["username"] = new_user
+    try:
+        _mutate(change)
+    except ReadOnlyError:
+        return False
+    return True
+
+
 def reject(value, days=30):
     if not _valid_id(value):
         raise ValueError("invalid Telegram ID")

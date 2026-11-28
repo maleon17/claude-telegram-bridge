@@ -209,6 +209,48 @@ def main():
         handlers.handle_callback_query(callback(f"wl:dc:{OTHER}:e"), state)
         handlers.handle_callback_query(callback(f"wl:de:{OTHER}:y"), state)
         assert json.loads((TMP / "data_removal_requests" / f"{OTHER}.json").read_text())["id"] == OTHER
+
+    # button presses edit the pressed message; username (not id) is shown in the list
+    calls = []
+    def tg2(method, params, **kwargs):
+        calls.append((method, params))
+        if method == "getChat":
+            return {"ok": True, "result": {"first_name": "Pal", "username": "pal_user"}}
+        if method == "editMessageText" and params.get("text", "").startswith("FAIL"):
+            return {"ok": False}
+        return {"ok": True}
+    people.add("1000000009", OWNER)
+    handlers._wl_lookup_done.clear()
+    handlers._wl_cached.clear()
+    with patch.object(handlers, "tg_call", side_effect=tg2), \
+            patch.object(people, "admins", return_value=set()):
+        pressed = callback("wl:list")
+        pressed["message"]["message_id"] = 501
+        handlers.handle_callback_query(pressed, {})
+        methods = [m for m, _ in calls if m in ("editMessageText", "sendMessage")]
+        assert methods == ["editMessageText"], methods
+        edit = [p for m, p in calls if m == "editMessageText"][0]
+        assert edit["message_id"] == 501 and edit["chat_id"] == int(OWNER)
+        labels = [b["text"] for row in edit["reply_markup"]["inline_keyboard"] for b in row]
+        assert any("Pal (@pal_user)" in label for label in labels), labels
+        assert people.load()["people"]["1000000009"]["username"] == "pal_user"
+        # edit failure falls back to a new message; later sends in one press are new messages
+        calls.clear()
+        handlers._wl_ctx.edit = (int(OWNER), 7)
+        handlers._wl_send(int(OWNER), "FAIL")
+        assert [m for m, _ in calls] == ["editMessageText", "sendMessage"]
+        calls.clear()
+        handlers._wl_ctx.edit = (int(OWNER), 7)
+        handlers._wl_send(1000000009, "stranger")
+        handlers._wl_send(int(OWNER), "first")
+        handlers._wl_send(int(OWNER), "second")
+        assert [m for m, _ in calls] == ["sendMessage", "editMessageText", "sendMessage"]
+        handlers._wl_ctx.edit = None
+    assert people.set_profile("1000000009", "", "bad name!") is False
+    assert people.set_profile("1000000777", "X", "xuser") is False  # unknown people are never created
+    assert people.set_profile("1000000009", "Other", "new_user") is True
+    assert people.load()["people"]["1000000009"]["username"] == "new_user"
+    assert people.load()["people"]["1000000009"]["note"] == "Pal"
     print("CLOSED: people registry, roles, isolation, owner UI, stranger notification, and callback protocol")
 
 

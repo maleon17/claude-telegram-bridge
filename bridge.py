@@ -708,6 +708,10 @@ def _process_message(msg, state):
         return
     if not people.is_allowed(user_id) and not people.is_rejected(user_id):
         notify_stranger(msg)
+    elif str(chat_id) == str(user_id):
+        sender = msg.get("from", {})
+        people.set_profile(
+            user_id, " ".join(p for p in (sender.get("first_name"), sender.get("last_name")) if p), sender.get("username") or "")
     onboarding_text = text or caption
     if handle_onboarding(chat_id, user_id, onboarding_text, state, None):
         return

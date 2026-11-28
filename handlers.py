@@ -207,10 +207,20 @@ _stranger_ids = set()
 _wl_seen_callbacks = {}
 
 
+_wl_ctx = threading.local()
+
+
 def _wl_send(chat_id, message, rows=None):
     params = {"chat_id": chat_id, "text": message}
     if rows:
         params["reply_markup"] = {"inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in rows]}
+    target = getattr(_wl_ctx, "edit", None)
+    if target and str(target[0]) == str(chat_id):
+        # a button press edits the message it was pressed on (first owner-chat reply only)
+        _wl_ctx.edit = None
+        result = tg_call("editMessageText", {**params, "message_id": target[1]})
+        if isinstance(result, dict) and (result.get("ok") or "not modified" in str(result.get("description", ""))):
+            return result
     return tg_call("sendMessage", params)
 
 
@@ -257,6 +267,8 @@ def handle_whitelist_message(msg, state):
         return True
     value = str(value)
     name = " ".join(part for part in (forwarded.get("first_name"), forwarded.get("last_name")) if part)
+    if forwarded.get("username"):
+        _wl_usernames[value] = forwarded["username"]
     _whitelist_pending.pop(str(OWNER_ID), None)
     _wl_send(chat_id, t("wl_choose_role", id=value), _wl_buttons(
         [(t("wl_member"), f"wl:r:{value}:m"), (t("wl_admin"), f"wl:r:{value}:a"), (t("wl_cancel"), f"wl:r:{value}:x")]
@@ -267,6 +279,7 @@ def handle_whitelist_message(msg, state):
 
 
 _wl_notes = {}
+_wl_usernames = {}
 
 
 def notify_stranger(msg):
@@ -285,7 +298,9 @@ def notify_stranger(msg):
     name = " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
     if name:
         _wl_notes[value] = name
-    _wl_send(OWNER_ID, t("wl_stranger", id=value, name=name), _wl_buttons(
+    if sender.get("username"):
+        _wl_usernames[value] = sender["username"]
+    _wl_send(OWNER_ID, t("wl_stranger", id=value, name=(f"{name}, @{sender['username']}" if name and sender.get("username") else (f"@{sender['username']}" if sender.get("username") else name))), _wl_buttons(
         [(t("wl_member"), f"wl:r:{value}:m"), (t("wl_admin"), f"wl:r:{value}:a"), (t("wl_reject"), f"wl:r:{value}:x")]
     ))
 
@@ -297,6 +312,7 @@ def _wl_finish_add(value, admin):
         return t("wl_already")
     try:
         people.add(value, OWNER_ID, _wl_notes.get(value, ""))
+        people.set_profile(value, _wl_notes.get(value, ""), _wl_usernames.get(value, ""))
     except people.ReadOnlyError as exc:
         return t("wl_read_only", error=str(exc))
     role_result = ""
@@ -315,13 +331,43 @@ def _wl_finish_add(value, admin):
     return t("wl_added", id=value, role="admin" if admin else "member", result=tenant_result)
 
 
+_wl_lookup_done = set()
+
+
+def _wl_profile(value):
+    """(name, username) for a person: from people.json, completed once per process through getChat."""
+    record = people.load()["people"].get(value, {})
+    name, username = record.get("note", ""), record.get("username", "")
+    if (not name or not username) and value not in _wl_lookup_done:
+        _wl_lookup_done.add(value)
+        chat = tg_call("getChat", {"chat_id": int(value)}, timeout=10)
+        info = chat.get("result") if isinstance(chat, dict) and chat.get("ok") else None
+        if isinstance(info, dict):
+            full = " ".join(part for part in (info.get("first_name"), info.get("last_name")) if part)
+            found = info.get("username") or ""
+            name, username = name or full, username or found
+            people.set_profile(value, full, found)
+            _wl_cached[value] = (name, username)
+    cached = _wl_cached.get(value, ("", ""))
+    return name or cached[0], username or cached[1]
+
+
+_wl_cached = {}
+
+
+def _wl_label(value):
+    """'Name (@username)'; the id is only a last resort when Telegram gives no username."""
+    name, username = _wl_profile(value)
+    handle = f"@{username}" if username else value
+    return f"{name} ({handle})" if name else handle
+
+
 def _wl_person(chat_id, value, state):
     record = people.load()["people"].get(value, {})
-    name = record.get("note") or value
     role = people.role_of(value)
     status = _wl_status(state, value)
     action = "m" if role == "admin" else "a"
-    _wl_send(chat_id, f"{name} ({value}), {role}, {status}", _wl_buttons(
+    _wl_send(chat_id, f"{_wl_label(value)}, {role}, {status}", _wl_buttons(
         [(t("wl_make_member") if action == "m" else t("wl_make_admin"), f"wl:s:{value}:{action}")],
         [(t("wl_delete"), f"wl:d:{value}"), (t("wl_back"), "wl:list")]
     ))
@@ -373,6 +419,16 @@ def _wl_delete(value, erase):
 
 
 def _handle_whitelist_callback(cq, state):
+    message = cq.get("message", {}) or {}
+    chat_id, message_id = message.get("chat", {}).get("id"), message.get("message_id")
+    _wl_ctx.edit = (chat_id, message_id) if chat_id and message_id is not None else None
+    try:
+        _handle_whitelist_callback_impl(cq, state)
+    finally:
+        _wl_ctx.edit = None
+
+
+def _handle_whitelist_callback_impl(cq, state):
     if str(cq.get("from", {}).get("id")) != str(OWNER_ID):
         return
     data = cq.get("data") or ""
@@ -404,11 +460,10 @@ def _handle_whitelist_callback(cq, state):
         for value, record in sorted(people.load()["people"].items()):
             if record.get("enabled") and people._valid_id(value):
                 shown.add(value)
-                name = record.get("note") or value
                 status = _wl_status(state, value)
-                rows.append([(f"{name} ({value}), {people.role_of(value)}, {status}"[:60], f"wl:p:{value}")])
+                rows.append([(f"{_wl_label(value)}, {people.role_of(value)}, {status}"[:60], f"wl:p:{value}")])
         if str(OWNER_ID) not in shown:
-            rows.insert(0, [(f"{OWNER_ID}, owner, {_wl_status(state, str(OWNER_ID))}", f"wl:p:{OWNER_ID}")])
+            rows.insert(0, [(f"{_wl_label(str(OWNER_ID))}, owner, {_wl_status(state, str(OWNER_ID))}"[:60], f"wl:p:{OWNER_ID}")])
         rows.append([(t("wl_back"), "wl:menu")])
         _wl_send(chat_id, t("wl_list_title"), rows)
     elif data == "wl:add":
