@@ -58,6 +58,30 @@ def main():
     assert brokered.exists() and not (exchange / "result" / brokered.name).exists()
     brokered.unlink()
 
+    # A private (0600) file copied into the outbox is made bridge-readable by the tool; symlinks are never followed.
+    private = exchange / "outbox" / "private.bin"
+    private.write_text("p")
+    private.chmod(0o600)
+    with patch.dict(os.environ, {"TENANT_EXCHANGE_DIR": str(exchange)}):
+        mcp._share_with_bridge(str(private))
+    assert stat.S_IMODE(os.stat(private).st_mode) == 0o660
+    plain = exchange / "outbox" / "plain.bin"
+    plain.write_text("o")
+    plain.chmod(0o600)
+    mcp._share_with_bridge(str(plain))  # not isolated: untouched
+    assert stat.S_IMODE(os.stat(plain).st_mode) == 0o600
+    alias = exchange / "outbox" / "alias.bin"
+    alias.symlink_to(plain)
+    with patch.dict(os.environ, {"TENANT_EXCHANGE_DIR": str(exchange)}):
+        mcp._share_with_bridge(str(alias))
+    assert stat.S_IMODE(os.stat(plain).st_mode) == 0o600
+    for leftover in (private, plain, alias):
+        leftover.unlink()
+    # An unreadable file gets a clear message instead of the generic failure.
+    with patch.object(exchange_io, "_copy_for_send", side_effect=PermissionError):
+        unreadable = request({"path": str(payload)})
+    assert unreadable["ok"] is False and "права 660" in unreadable["text"]
+
     good = request({"path": str(payload), "caption": "hello", "chat_id": int(other)})
     assert good == {"done": True, "ok": True, "text": "Файл отправлен."}
     assert calls[-1][:3] == (int(tenant), "safe content", "hello")
