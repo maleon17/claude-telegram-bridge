@@ -12,6 +12,7 @@ TEST_ROOT = tempfile.mkdtemp(prefix="bridge_delegate_login_")
 os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxxxxxxxxxx"
 os.environ["OWNER_ID"] = "1000000001"
 os.environ["BRIDGE_STATE_FILE"] = os.path.join(TEST_ROOT, "state.json")
+os.environ["BRIDGE_PEOPLE_FILE"] = os.path.join(TEST_ROOT, "people.json")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import handlers  # noqa: E402
@@ -20,7 +21,8 @@ from state_store import delegate_key  # noqa: E402
 
 
 def main():
-    chat_id = 42
+    chat_id = 1000000002
+    runtime.people.add(chat_id, runtime.OWNER_ID)
     owner_home = runtime.account_dir(chat_id)
     delegate_home = runtime.account_dir(chat_id, state_key=delegate_key(chat_id))
     assert owner_home != delegate_home

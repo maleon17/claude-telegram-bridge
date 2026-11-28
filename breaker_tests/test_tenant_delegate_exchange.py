@@ -40,7 +40,7 @@ def main():
     with patch.object(runtime, "ensure_tenant", side_effect=provision), \
             patch.object(runtime, "codex_bridge_dir", return_value=TMP), \
             patch.object(runtime, "BRIDGE_ISOLATION", "on"), \
-            patch.object(runtime, "ISOLATED_TENANTS", frozenset((tenant, owner))):
+            patch.object(runtime.people, "is_allowed", side_effect=lambda value: str(value) in (tenant, owner)):
         argv = runtime.tenant_run_argv("delegate:" + tenant, "delegate", args=("-p",))
         assert argv[4:8] == ["--kind", "main", "--product", "delegate"]
         assert str(exchange / "persona.delegate.md") in argv

@@ -184,7 +184,7 @@ def main():
         with patch.object(runtime, 'ensure_tenant', side_effect=provision), \
              patch.object(runtime, 'codex_bridge_dir', return_value=None), \
              patch.object(runtime, 'BRIDGE_ISOLATION', 'on'), \
-             patch.object(runtime, 'ISOLATED_TENANTS', frozenset({TENANT})):
+             patch.object(runtime.people, 'is_allowed', side_effect=lambda value: str(value) == TENANT):
             servers = runtime._isolated_mcp_servers(TENANT)
             assert set(servers) == {'fake', 'http'}
             assert servers['fake']['env'] == {'BROKERED_SERVER': 'fake', 'TENANT_EXCHANGE_DIR': str(EXCHANGE)}

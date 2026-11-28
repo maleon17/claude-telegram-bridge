@@ -125,8 +125,17 @@ memory files apply for that chat's `CLAUDE_CONFIG_DIR`. To give the bridged assi
 personality or house rules, drop a `CLAUDE.md` into its config dir or its
 workspace — see `personality.example.md` in this repo for a starting point.
 
-Multi-tenancy: `whitelist.txt` (hand-edited, reloaded every message, no
-restart) gates access. Every chat, including the owner, has an isolated
+Multi-tenancy: `people.py` reads the shared `people.json` registry (default
+`/var/lib/telegram-ai/people.json`, overridable with `BRIDGE_PEOPLE_FILE`).
+It stores version 1 and records with `added`, `added_by`, `note`, `enabled`,
+and `rejected_until`. Missing registries import valid IDs from the existing
+`whitelist.txt` without changing it. The owner is always allowed. The owner
+manages people and Member/Admin roles with `/whitelist`; Admin requires a
+second confirmation and is resolved via `tenant-role`, not the registry.
+Unknown users notify the owner at most once per day; Reject silences them
+for 30 days. Removal locks the tenant, and optional data removal only queues
+an administrator request in `data_removal_requests/`.
+Every chat, including the owner, has an isolated
 `CLAUDE_CONFIG_DIR` under `accounts/<chat_id>/` and its own `/login` OAuth
 flow. Do not share `.credentials.json` with `~/.claude` by symlink or copy:
 Claude CLI replaces this file during refresh, and independent homes need
@@ -135,8 +144,11 @@ tenant is created so `/resume` continues to work after migration.
 Delegated turns use another isolated home and require `/login delegate`
 before their first use. The ordinary `/login` authenticates the chat home.
 
-Optional tenant isolation is gated by `BRIDGE_ISOLATION=on` and the
-`ISOLATED_TENANTS` list. Selected chats and their delegate processes are
+Optional tenant isolation is gated by `BRIDGE_ISOLATION=on`. Every allowed
+private chat and its delegate process is isolated by default; use
+`BRIDGE_ISOLATION_EXEMPT=<id,...>` for an emergency per-person exception.
+To revert the allowlist, remove or move `people.json`, restore the intended
+IDs in `whitelist.txt`, then start the bridge so it imports them. Chats are
 provisioned through root-owned helpers and launched under tenant Unix uids;
 provisioning failure blocks the turn. The bridge calls tenant-side tools for
 session listings and account limits. This integration needs separately installed

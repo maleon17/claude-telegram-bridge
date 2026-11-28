@@ -573,6 +573,90 @@ for _key, _values in _COMMAND_OUTPUTS.items():
     for _language, _value in zip(("en", "uk", "kk", "de"), _values):
         STRINGS[_language][_key] = _value
 
+_WL_STRINGS = {
+    "ru": {
+        "wl_menu": "Управление списком доступа", "wl_list": "Список", "wl_add": "Добавить", "wl_close": "Закрыть",
+        "wl_cancel": "Отмена", "wl_cancelled": "Отменено.", "wl_expired": "Ожидание ID истекло. Нажмите «Добавить» снова.",
+        "wl_invalid_id": "Пришлите Telegram ID: 5–15 цифр, либо перешлите сообщение человека.",
+        "wl_choose_role": "ID {id}: какая роль?", "wl_member": "Member", "wl_admin": "Admin",
+        "wl_stranger": "Незнакомый ID {id} ({name}) написал боту.", "wl_reject": "Отклонить",
+        "wl_access_denied": "Доступ не выдан.", "wl_rejected": "ID {id} отклонён на 30 дней.",
+        "wl_admin_confirm": "Admin = root-эквивалент на сервере для ID {id}. Выдать?",
+        "wl_yes_grant": "Да, выдать", "wl_no": "Нет", "wl_already": "Уже сделано.",
+        "wl_read_only": "Реестр доступен только для чтения: {error}",
+        "wl_role_failed": "Не удалось изменить роль ID {id}: {error}",
+        "wl_tenant_created": "тенант создан", "wl_tenant_failed": "тенант не создан: {error}",
+        "wl_added": "ID {id} добавлен как {role}; {result}. Пусть человек напишет боту и сделает /login.",
+        "wl_not_ready": "нет", "wl_make_member": "Сделать member", "wl_make_admin": "Сделать admin",
+        "wl_delete": "Удалить из списка", "wl_back": "Назад", "wl_owner_protected": "Владельца удалить нельзя.",
+        "wl_lock_failed": "ID {id} удалён из списка, но блокировка тенанта не удалась: {error}",
+        "wl_queue_failed": "Не удалось записать запрос на очистку: {error}",
+        "wl_queued": "ID {id} отключён. Запрос на очистку записан; данные удалит администратор.",
+        "wl_removed": "ID {id} отключён; данные оставлены.", "wl_closed": "Закрыто.",
+        "wl_list_title": "Люди в списке:", "wl_ask_id": "Пришлите ID цифрами или перешлите сообщение человека. /cancel — отмена.",
+        "wl_role_changed": "Роль ID {id} изменена на {role}.",
+        "wl_delete_prompt": "Отключить ID {id}?", "wl_keep_data": "Отключить, данные оставить",
+        "wl_erase_data": "Отключить и удалить данные", "wl_erase_confirm": "Подтвердить запрос на очистку данных ID {id}?",
+        "wl_yes_erase": "Да, отключить и запросить очистку",
+    },
+    "en": {
+        "wl_menu": "Manage access", "wl_list": "List", "wl_add": "Add", "wl_close": "Close", "wl_cancel": "Cancel",
+        "wl_cancelled": "Cancelled.", "wl_expired": "ID entry expired. Tap Add again.",
+        "wl_invalid_id": "Send a Telegram ID (5–15 digits) or forward their message.",
+        "wl_choose_role": "ID {id}: choose a role.", "wl_member": "Member", "wl_admin": "Admin",
+        "wl_stranger": "Unknown ID {id} ({name}) messaged the bot.", "wl_reject": "Reject",
+        "wl_access_denied": "Access was not granted.", "wl_rejected": "ID {id} rejected for 30 days.",
+        "wl_admin_confirm": "Admin has root-equivalent access on the server for ID {id}. Grant it?",
+        "wl_yes_grant": "Yes, grant", "wl_no": "No", "wl_already": "Already done.",
+        "wl_read_only": "Registry is read-only: {error}", "wl_role_failed": "Could not change role for ID {id}: {error}",
+        "wl_tenant_created": "tenant created", "wl_tenant_failed": "tenant creation failed: {error}",
+        "wl_added": "ID {id} added as {role}; {result}. Ask them to message the bot and run /login.",
+        "wl_not_ready": "no", "wl_make_member": "Make member", "wl_make_admin": "Make admin",
+        "wl_delete": "Remove from list", "wl_back": "Back", "wl_owner_protected": "The owner cannot be removed.",
+        "wl_lock_failed": "ID {id} removed, but tenant lock failed: {error}",
+        "wl_queue_failed": "Could not queue data removal: {error}",
+        "wl_queued": "ID {id} disabled. A data removal request was queued for an administrator.",
+        "wl_removed": "ID {id} disabled; data retained.", "wl_closed": "Closed.",
+        "wl_list_title": "People with access:", "wl_ask_id": "Send an ID or forward a message. /cancel to cancel.",
+        "wl_role_changed": "ID {id} is now {role}.", "wl_delete_prompt": "Disable ID {id}?",
+        "wl_keep_data": "Disable, keep data", "wl_erase_data": "Disable and remove data",
+        "wl_erase_confirm": "Confirm data removal request for ID {id}?", "wl_yes_erase": "Yes, disable and request removal",
+    },
+    "uk": {
+        "wl_menu": "Керування доступом", "wl_list": "Список", "wl_add": "Додати", "wl_close": "Закрити",
+        "wl_cancel": "Скасувати", "wl_cancelled": "Скасовано.", "wl_expired": "Час очікування ID минув. Натисніть «Додати» знову.",
+        "wl_invalid_id": "Надішліть Telegram ID (5–15 цифр) або перешліть повідомлення людини.",
+        "wl_choose_role": "ID {id}: оберіть роль.", "wl_member": "Member", "wl_admin": "Admin",
+        "wl_stranger": "Невідомий ID {id} ({name}) написав боту.", "wl_reject": "Відхилити",
+        "wl_access_denied": "Доступ не надано.", "wl_rejected": "ID {id} відхилено на 30 днів.",
+        "wl_admin_confirm": "Admin має права, еквівалентні root на сервері, для ID {id}. Надати?",
+        "wl_yes_grant": "Так, надати", "wl_no": "Ні", "wl_already": "Уже зроблено.",
+        "wl_read_only": "Реєстр доступний лише для читання: {error}", "wl_role_failed": "Не вдалося змінити роль ID {id}: {error}",
+        "wl_tenant_created": "тенант створено", "wl_tenant_failed": "тенант не створено: {error}",
+        "wl_added": "ID {id} додано як {role}; {result}. Нехай людина напише боту й виконає /login.",
+        "wl_not_ready": "немає", "wl_make_member": "Зробити member", "wl_make_admin": "Зробити admin",
+        "wl_delete": "Вилучити зі списку", "wl_back": "Назад", "wl_owner_protected": "Власника вилучити не можна.",
+        "wl_lock_failed": "ID {id} вилучено, але блокування тенанта не вдалося: {error}",
+        "wl_queue_failed": "Не вдалося записати запит на очищення: {error}",
+        "wl_queued": "ID {id} вимкнено. Запит на очищення записано; дані видалить адміністратор.",
+        "wl_removed": "ID {id} вимкнено; дані збережено.", "wl_closed": "Закрито.",
+        "wl_list_title": "Люди з доступом:", "wl_ask_id": "Надішліть ID або перешліть повідомлення. /cancel — скасувати.",
+        "wl_role_changed": "Роль ID {id} змінено на {role}.", "wl_delete_prompt": "Вимкнути ID {id}?",
+        "wl_keep_data": "Вимкнути, дані зберегти", "wl_erase_data": "Вимкнути й видалити дані",
+        "wl_erase_confirm": "Підтвердити запит на очищення даних ID {id}?", "wl_yes_erase": "Так, вимкнути й запитати очищення",
+    },
+}
+for _language, _texts in _WL_STRINGS.items():
+    STRINGS[_language].update(_texts)
+for _language in ("kk", "de"):
+    STRINGS[_language].update(_WL_STRINGS["ru"])
+for _language in COMMAND_DESCRIPTIONS:
+    COMMAND_DESCRIPTIONS[_language]["whitelist"] = {
+        "ru": "Управлять списком доступа (владелец)", "en": "Manage access (owner only)",
+        "uk": "Керувати доступом (власник)", "kk": "Қолжетімділікті басқару (иесі)",
+        "de": "Zugriff verwalten (Inhaber)",
+    }[_language]
+
 
 def t(key, lang=None, **kwargs) -> str:
     lang = lang or current_language.get()

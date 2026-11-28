@@ -19,12 +19,14 @@ def main():
         os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxxxxxxxxxx"
         os.environ["OWNER_ID"] = "1000000001"
         os.environ["BRIDGE_STATE_FILE"] = str(Path(temporary) / "state.json")
+        os.environ["BRIDGE_PEOPLE_FILE"] = str(Path(temporary) / "people.json")
         import handlers
         import runtime
         from state_store import _localize_limit_line
         from strings import current_language, t
 
         chat_id = 2000000002
+        runtime.people.add(chat_id, runtime.OWNER_ID)
         state = {}
         sent = []
         edits = []

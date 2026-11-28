@@ -85,15 +85,19 @@ The installer checks your bot token with Telegram, asks for your Telegram ID and
 
 ## Letting other people in
 
-Put their numeric Telegram IDs into `whitelist.txt` (one per line or comma-separated) — no restart needed. On their first message they get the same login button and connect **their own** Claude subscription; nobody shares your billing, sessions or context.
+The owner manages access with `/whitelist` in a private chat: list people, add a numeric Telegram ID or forward their message, then choose Member or Admin. Admin grants root-equivalent server privileges and requires a second confirmation. Unknown people trigger a once-per-day owner notification with Member, Admin, and Reject buttons. Rejected people are silenced for 30 days. New people should message the bot and run `/login` to connect **their own** Claude subscription; nobody shares billing, sessions, or context.
+
+Access is stored in `BRIDGE_PEOPLE_FILE` (default `/var/lib/telegram-ai/people.json`) as `{"version":1,"people":{"<id>":{"added":"<iso>","added_by":"<id>","note":"","enabled":true,"rejected_until":null}}}`. The owner is always allowed. Roles are resolved through `tenant-role list`; they are not stored in this file. On first use, the bridge imports valid IDs from its existing `whitelist.txt` if `people.json` does not exist; it leaves the old file untouched. A read-only registry blocks changes and reports the error to the owner.
 
 Every chat lives in `accounts/<chat_id>/`. On your own first use, your existing persona (`~/.claude/CLAUDE.md`), MCP servers and past sessions are copied in — your credentials are not. Removing an ID blocks new messages; their data stays on disk until you delete it.
 
-> **Security:** by default, all users share the service's Linux user, and `bypass` gives Claude everything that user can do. Whitelist only people you trust; use separate Linux users or containers if you need hard isolation.
+> **Security:** when tenant isolation is off, users share the service's Linux user, and `bypass` gives Claude everything that user can do. Admin promotion through the bridge can grant root-equivalent access; restrict the owner chat and bot token accordingly.
 
 ## Tenant isolation (optional)
 
-Set `BRIDGE_ISOLATION=on` and `ISOLATED_TENANTS=<comma-separated Telegram IDs>` in the bridge environment to run selected Claude chats under tenant Unix users. The default is `BRIDGE_ISOLATION=off`; unlisted chats keep the existing behavior. Tests can override helper paths with `BRIDGE_TENANT_PROVISION` and `BRIDGE_TENANT_RUN`.
+Set `BRIDGE_ISOLATION=on` to run every allowed private chat under its tenant Unix user, including the owner and admins. The default is `BRIDGE_ISOLATION=off`. For an emergency exception, set `BRIDGE_ISOLATION_EXEMPT=<comma-separated Telegram IDs>`. To revert to the legacy allowlist, remove or move `people.json` and restore the intended IDs in `whitelist.txt` before starting the bridge; the next load imports them. Tests can override helper paths with `BRIDGE_TENANT_PROVISION` and `BRIDGE_TENANT_RUN`.
+
+Removing someone with `/whitelist` locks their tenant and keeps its data. The optional data removal choice writes `data_removal_requests/<id>.json` for an administrator; this bridge does not erase tenant data.
 For an ordinary isolated tenant, `/login delegate` and delegated turns use the **same Unix uid** as the main chat, with a separate `.claude-delegate` config and a shared workspace. The owner's delegate retains its separate Unix uid. The delegate's persona and MCP copies in `.exchange` are `persona.delegate.md` and `mcp.delegate.json`; the main chat uses `persona.md` and `mcp.json`.
 
 This mode requires installed root-owned `tenant-provision` and `tenant-run` helpers, their sudo rules, and the root-owned `account-limits` and `list-sessions` tools under `/opt/telegram-ai/tools/`. The helpers, sudo rules, limits, firewall and the optional per-tenant disk quota are installed by the opt-in installer in the [core repository](https://github.com/maleon17/telegram-ai-core/tree/main/isolation) (`isolation/install_isolation.sh`, see its README); a normal `setup.sh` installation does not enable isolation by itself. If provisioning fails, the selected chat cannot start a turn. Its `/workspace` is limited to its own `workspace/` and stored as a relative path.

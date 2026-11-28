@@ -13,7 +13,7 @@ TMP = Path(tempfile.mkdtemp(prefix="bridge_isolation_"))
 os.environ["BRIDGE_TENANT_CONTROL_DIR"] = str(TMP / "control")
 os.environ["BRIDGE_ISOLATED_MCP_DIR"] = str(TMP / "no-mcp")
 os.environ.update(TELEGRAM_BOT_TOKEN="fake", OWNER_ID="1000000001",
-                  BRIDGE_STATE_FILE=str(TMP / "state.json"), BRIDGE_ISOLATION="off")
+                  BRIDGE_STATE_FILE=str(TMP / "state.json"), BRIDGE_PEOPLE_FILE=str(TMP / "people.json"), BRIDGE_ISOLATION="off")
 sys.path.insert(0, str(ROOT))
 import chat_process  # noqa: E402
 import handlers  # noqa: E402
@@ -62,7 +62,7 @@ def main():
     runner.chmod(0o755)
     runtime.BRIDGE_TENANT_PROVISION = str(provision)
     runtime.BRIDGE_TENANT_RUN = str(runner)
-    runtime.ISOLATED_TENANTS = frozenset({tenant})
+    runtime.people.add(tenant, "1000000001")
     with patch.dict(os.environ, {"PATH": str(fake_bin) + ":/usr/bin:/bin"}):
         assert runtime.ensure_tenant(tenant)["uid"] == 22001
         assert runtime.ensure_tenant(tenant, "delegate")["kind"] == "delegate"

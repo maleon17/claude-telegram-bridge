@@ -25,6 +25,7 @@ import traceback
 from collections import deque
 
 from strings import current_language, t
+import people
 
 from runtime import (
     EXTERNAL_RESULT_DIR,
@@ -32,9 +33,9 @@ from runtime import (
     FILE_SEND_QUEUE_DIR,
     FILE_SEND_RESULT_DIR, LOCAL_BOT_API, MAX_DOCUMENT_BYTES, OWNER_ID, RESTART_SIGNAL_FILE,
     SERVICE_NAME, WAKEUP_SIGNAL_DIR, busy_chats, chat_procs, chat_procs_lock, current_offset, draining,
-    ensure_owner_mcp_config, intake_active, intake_lock, intake_queues, load_whitelist,
+    ensure_owner_mcp_config, intake_active, intake_lock, intake_queues,
     pending_batches, pending_progress_lock, pending_progress_msg_ids, tenant_file_outbox,
-    TenantUnavailable, BRIDGE_ISOLATION, ISOLATED_TENANTS, ensure_tenant, tenant_isolated,
+    TenantUnavailable, BRIDGE_ISOLATION, ensure_tenant, tenant_isolated,
 )
 from tenant_exchange import process_tenant_queue
 from tenant_delegate_exchange import process_tenant_delegate_queue
@@ -53,6 +54,7 @@ from chat_process import (
 )
 from handlers import (
     cancel_pending_batch, handle_callback_query, handle_command, handle_onboarding, handle_persona_reply,
+    handle_whitelist_message, notify_stranger,
     process_key_for_command, process_key_for_incoming, register_commands, route_prompt,
     spawn_turn, start_delegate_turn,
 )
@@ -63,6 +65,23 @@ from telegram_api import (
 
 
 BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
+_watched_tenants = set()
+
+
+def _start_isolated_watchers():
+    if BRIDGE_ISOLATION != "on":
+        return
+    delegate_script = os.path.join(os.environ.get("BRIDGE_ISOLATED_MCP_DIR", "/opt/telegram-ai/mcp"),
+                                   "delegate_to_codex_exchange_mcp.py")
+    delegation_ready = os.path.isfile(delegate_script) and codex_bridge_dir() is not None
+    for tenant_id in people.load()["people"] | {str(OWNER_ID): {}}:
+        if tenant_id in _watched_tenants or not tenant_isolated(tenant_id):
+            continue
+        _watched_tenants.add(tenant_id)
+        threading.Thread(target=_isolated_file_send_watcher_loop, args=(tenant_id,), daemon=True).start()
+        threading.Thread(target=_isolated_mcp_watcher_loop, args=(tenant_id,), daemon=True).start()
+        if delegation_ready:
+            threading.Thread(target=_isolated_delegate_watcher_loop, args=(tenant_id,), daemon=True).start()
 CROSS_DELEGATE_QUEUE_DIR = os.path.join(BRIDGE_DIR, "cross_delegate_queue")
 CROSS_DELEGATE_RESULT_DIR = os.path.join(BRIDGE_DIR, "cross_delegate_result")
 
@@ -131,7 +150,7 @@ def _file_send_watcher_loop(state=None):
                     caption = request.get("caption", "")
                     if not isinstance(chat_id, int) or isinstance(chat_id, bool):
                         result_text = t('bridge_file_send_watcher_loop_2')
-                    elif str(chat_id) not in load_whitelist():
+                    elif not people.is_allowed(chat_id):
                         result_text = t('bridge_file_send_watcher_loop_3')
                     elif not isinstance(path, str) or not isinstance(caption, str):
                         result_text = t('bridge_file_send_watcher_loop_4')
@@ -165,7 +184,7 @@ def _isolated_file_send_watcher_loop(tenant_id):
     """Poll one main tenant so its slow Telegram sends cannot delay peers."""
     while True:
         time.sleep(1.0)
-        if BRIDGE_ISOLATION != "on":
+        if not tenant_isolated(tenant_id):
             continue
         try:
             exchange = ensure_tenant(tenant_id, "main")["exchange"]
@@ -178,7 +197,7 @@ def _isolated_delegate_watcher_loop(tenant_id):
     """Poll one main tenant without waiting for a delegated turn to finish."""
     while True:
         time.sleep(1.0)
-        if BRIDGE_ISOLATION != "on":
+        if not tenant_isolated(tenant_id):
             continue
         try:
             exchange = ensure_tenant(tenant_id, "main")["exchange"]
@@ -191,7 +210,7 @@ def _isolated_mcp_watcher_loop(tenant_id):
     """Poll brokered MCP calls from one isolated tenant."""
     while True:
         time.sleep(1.0)
-        if BRIDGE_ISOLATION != "on":
+        if not tenant_isolated(tenant_id):
             continue
         try:
             exchange = ensure_tenant(tenant_id, "main")["exchange"]
@@ -531,7 +550,7 @@ def _cross_delegate_watcher_loop(state):
                     result_text = t('bridge_file_send_watcher_loop_2')
                 elif not isinstance(text, str) or not text.strip():
                     result_text = t('bridge_cross_delegate_watcher_loop_2')
-                elif str(chat_id) not in load_whitelist():
+                elif not people.is_allowed(chat_id):
                     result_text = (
                         t('bridge_cross_delegate_watcher_loop_3')
                     )
@@ -685,9 +704,12 @@ def _process_message(msg, state):
     ):
         return
 
-    whitelist = load_whitelist()
+    if handle_whitelist_message(msg, state):
+        return
+    if not people.is_allowed(user_id) and not people.is_rejected(user_id):
+        notify_stranger(msg)
     onboarding_text = text or caption
-    if handle_onboarding(chat_id, user_id, onboarding_text, state, whitelist):
+    if handle_onboarding(chat_id, user_id, onboarding_text, state, None):
         return
 
     # A /persona replacement is authorized by Telegram's reply target, not
@@ -771,7 +793,7 @@ def _process_message(msg, state):
             not photo and not document and not voice and not video and text.startswith(("/", "."))
             and not forwarded
         ):
-            if handle_command(chat_id, text, state, offset=current_offset[0]):
+            if handle_command(chat_id, text, state, offset=current_offset[0], from_id=user_id):
                 return
 
         attachment_note = ""
@@ -879,7 +901,7 @@ def _is_urgent_stop(msg, state):
         return False
     user_id = msg.get("from", {}).get("id")
     return (
-        str(user_id) in load_whitelist()
+        people.is_allowed(user_id)
         and _account_status_or_report(state, msg["chat"]["id"]) == "ready"
     )
 
@@ -955,19 +977,7 @@ def main():
     threading.Thread(target=_external_request_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_cross_delegate_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_file_send_watcher_loop, args=(state,), daemon=True).start()
-    if BRIDGE_ISOLATION == "on" and ISOLATED_TENANTS:
-        delegate_script = os.path.join(os.environ.get("BRIDGE_ISOLATED_MCP_DIR", "/opt/telegram-ai/mcp"),
-                                       "delegate_to_codex_exchange_mcp.py")
-        delegation_ready = os.path.isfile(delegate_script) and codex_bridge_dir() is not None
-        for tenant_id in ISOLATED_TENANTS:
-            if tenant_id.isdecimal():
-                threading.Thread(target=_isolated_file_send_watcher_loop,
-                                 args=(tenant_id,), daemon=True).start()
-                threading.Thread(target=_isolated_mcp_watcher_loop,
-                                 args=(tenant_id,), daemon=True).start()
-                if delegation_ready:
-                    threading.Thread(target=_isolated_delegate_watcher_loop,
-                                     args=(tenant_id,), daemon=True).start()
+    _start_isolated_watchers()
     threading.Thread(target=_wakeup_watcher_loop, args=(state,), daemon=True).start()
     threading.Thread(target=_chat_proc_idle_reaper_loop, daemon=True).start()
     threading.Thread(target=_pending_delivery_watcher_loop, args=(state,), daemon=True).start()
@@ -992,6 +1002,7 @@ def main():
             continue
 
         for update in r.get("result", []):
+            _start_isolated_watchers()
             offset = update["update_id"] + 1
             current_offset[0] = offset
 

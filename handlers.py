@@ -11,13 +11,15 @@ import threading
 import time
 import traceback
 import uuid
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
+import people
 
 from strings import COMMAND_DESCRIPTIONS, current_language, t
 
 from runtime import (
     ACCOUNTS_DIR, BATCH_DEBOUNCE_S, CLAUDE_BIN, MAX_MSG_LEN, OWNER_ID, SERVICE_NAME, WORKDIR, account_dir,
-    batch_timers, busy_chats, claude_env, draining, intake_active, intake_queues, intake_lock, load_whitelist,
+    batch_timers, busy_chats, claude_env, draining, intake_active, intake_queues, intake_lock,
     pending_batch_generations, pending_batches, pending_batches_lock, pending_logins,
     _write_default_persona_marker, TenantUnavailable, ensure_tenant,
     tenant_target, tenant_isolated, tenant_run_argv, tenant_tool_json,
@@ -199,6 +201,271 @@ def _delegate_error(chat_id, text, request_id=None):
         write_last_turn(chat_id, text, delegated=True)
 
 COMMANDS = tuple(COMMAND_DESCRIPTIONS["ru"].items())
+_whitelist_pending = {}
+_stranger_notified = {}
+_stranger_ids = set()
+_wl_seen_callbacks = {}
+
+
+def _wl_send(chat_id, message, rows=None):
+    params = {"chat_id": chat_id, "text": message}
+    if rows:
+        params["reply_markup"] = {"inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in rows]}
+    return tg_call("sendMessage", params)
+
+
+def _wl_buttons(*rows):
+    return rows
+
+
+def _wl_menu(chat_id):
+    _wl_send(chat_id, t("wl_menu"), _wl_buttons(
+        [(t("wl_list"), "wl:list"), (t("wl_add"), "wl:add")],
+        [(t("wl_close"), "wl:menu")],
+    ))
+
+
+def handle_whitelist_message(msg, state):
+    """Consume owner-only whitelist input before normal onboarding/routing."""
+    chat_id = msg.get("chat", {}).get("id")
+    if str(chat_id) != str(OWNER_ID) or str(msg.get("from", {}).get("id")) != str(OWNER_ID):
+        return False
+    text = (msg.get("text") or "").strip()
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+    if command == "/whitelist":
+        _whitelist_pending.pop(str(OWNER_ID), None)
+        _wl_menu(chat_id)
+        return True
+    if command == "/cancel":
+        if _whitelist_pending.pop(str(OWNER_ID), None):
+            _wl_send(chat_id, t("wl_cancelled"))
+        else:
+            _wl_send(chat_id, t("wl_already"))
+        return True
+    pending = _whitelist_pending.get(str(OWNER_ID))
+    if pending is None:
+        return False
+    if time.monotonic() > pending:
+        _whitelist_pending.pop(str(OWNER_ID), None)
+        _wl_send(chat_id, t("wl_expired"))
+        return True
+    origin = msg.get("forward_origin") or {}
+    forwarded = msg.get("forward_from") or origin.get("sender_user") or {}
+    value = forwarded.get("id") or text
+    if not people._valid_id(value):
+        _wl_send(chat_id, t("wl_invalid_id"))
+        return True
+    value = str(value)
+    name = " ".join(part for part in (forwarded.get("first_name"), forwarded.get("last_name")) if part)
+    _whitelist_pending.pop(str(OWNER_ID), None)
+    _wl_send(chat_id, t("wl_choose_role", id=value), _wl_buttons(
+        [(t("wl_member"), f"wl:r:{value}:m"), (t("wl_admin"), f"wl:r:{value}:a"), (t("wl_cancel"), f"wl:r:{value}:x")]
+    ))
+    if name:
+        _wl_notes[value] = name
+    return True
+
+
+_wl_notes = {}
+
+
+def notify_stranger(msg):
+    value = msg.get("from", {}).get("id")
+    if str(msg.get("chat", {}).get("id")) != str(value):
+        return
+    if people.is_allowed(value) or people.is_rejected(value) or not people._valid_id(value):
+        return
+    value = str(value)
+    now = time.monotonic()
+    if now - _stranger_notified.get(value, -86400) < 86400:
+        return
+    _stranger_notified[value] = now
+    _stranger_ids.add(value)
+    sender = msg.get("from", {})
+    name = " ".join(part for part in (sender.get("first_name"), sender.get("last_name")) if part)
+    if name:
+        _wl_notes[value] = name
+    _wl_send(OWNER_ID, t("wl_stranger", id=value, name=name), _wl_buttons(
+        [(t("wl_member"), f"wl:r:{value}:m"), (t("wl_admin"), f"wl:r:{value}:a"), (t("wl_reject"), f"wl:r:{value}:x")]
+    ))
+
+
+def _wl_finish_add(value, admin):
+    already = people.is_allowed(value)
+    old_role = people.role_of(value) if already else "none"
+    if already and (not admin or old_role in ("admin", "owner")):
+        return t("wl_already")
+    try:
+        people.add(value, OWNER_ID, _wl_notes.get(value, ""))
+    except people.ReadOnlyError as exc:
+        return t("wl_read_only", error=str(exc))
+    role_result = ""
+    if admin:
+        ok, role_result = people.grant_admin(value)
+        if not ok:
+            return t("wl_role_failed", id=value, error=role_result)
+    try:
+        info = ensure_tenant(value, "main")
+        tenant_result = t("wl_tenant_created") if info else t("wl_tenant_failed", error="empty result")
+    except TenantUnavailable as exc:
+        tenant_result = t("wl_tenant_failed", error=str(exc))
+    _stranger_ids.discard(value)
+    if already:
+        return t("wl_role_changed", id=value, role="admin")
+    return t("wl_added", id=value, role="admin" if admin else "member", result=tenant_result)
+
+
+def _wl_person(chat_id, value, state):
+    record = people.load()["people"].get(value, {})
+    name = record.get("note") or value
+    role = people.role_of(value)
+    status = _wl_status(state, value)
+    action = "m" if role == "admin" else "a"
+    _wl_send(chat_id, f"{name} ({value}), {role}, {status}", _wl_buttons(
+        [(t("wl_make_member") if action == "m" else t("wl_make_admin"), f"wl:s:{value}:{action}")],
+        [(t("wl_delete"), f"wl:d:{value}"), (t("wl_back"), "wl:list")]
+    ))
+
+
+def _wl_lock(value):
+    try:
+        result = subprocess.run(["sudo", "-n", "/usr/local/sbin/tenant-provision", "lock", value], capture_output=True, text=True, timeout=120)
+        return result.returncode == 0, (result.stderr or result.stdout).strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+
+
+def _wl_status(state, value):
+    try:
+        return "ready" if get_account_status(state, value) == "ready" else t("wl_not_ready")
+    except TenantUnavailable:
+        return t("wl_not_ready")
+
+
+def _wl_delete(value, erase):
+    if value == str(OWNER_ID):
+        return t("wl_owner_protected")
+    if not people.is_allowed(value):
+        return t("wl_already")
+    if people.role_of(value) == "admin":
+        ok, message = people.revoke_admin(value)
+        if not ok:
+            return t("wl_role_failed", id=value, error=message)
+    try:
+        people.remove(value)
+    except people.ReadOnlyError as exc:
+        return t("wl_read_only", error=str(exc))
+    ok, message = _wl_lock(value)
+    if not ok:
+        return t("wl_lock_failed", id=value, error=message)
+    if erase:
+        directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_removal_requests")
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            path = os.path.join(directory, value + ".json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"id": value, "requested_at": datetime.now(timezone.utc).isoformat(), "requested_by": str(OWNER_ID)}, handle)
+            os.chmod(path, 0o600)
+        except OSError as exc:
+            return t("wl_queue_failed", error=str(exc))
+        return t("wl_queued", id=value)
+    return t("wl_removed", id=value)
+
+
+def _handle_whitelist_callback(cq, state):
+    if str(cq.get("from", {}).get("id")) != str(OWNER_ID):
+        return
+    data = cq.get("data") or ""
+    chat_id = cq.get("message", {}).get("chat", {}).get("id")
+    if not chat_id or str(chat_id) != str(OWNER_ID) or len(data.encode("utf-8")) > 64:
+        return
+    parts = data.split(":")
+    if len(parts) >= 3 and not people._valid_id(parts[2]):
+        return
+    message_id = cq.get("message", {}).get("message_id")
+    if message_id is not None:
+        key = (message_id, data)
+        if key in _wl_seen_callbacks:
+            answer_callback_query(cq["id"], t("wl_already"))
+            return
+        _wl_seen_callbacks[key] = time.monotonic()
+        if len(_wl_seen_callbacks) > 4096:
+            _wl_seen_callbacks.pop(next(iter(_wl_seen_callbacks)))
+    answer_callback_query(cq["id"])
+    if data == "wl:menu":
+        _whitelist_pending.pop(str(OWNER_ID), None)
+        if cq.get("message", {}).get("text") == t("wl_menu"):
+            _wl_send(chat_id, t("wl_closed"))
+        else:
+            _wl_menu(chat_id)
+    elif data == "wl:list":
+        rows = []
+        shown = set()
+        for value, record in sorted(people.load()["people"].items()):
+            if record.get("enabled") and people._valid_id(value):
+                shown.add(value)
+                name = record.get("note") or value
+                status = _wl_status(state, value)
+                rows.append([(f"{name} ({value}), {people.role_of(value)}, {status}"[:60], f"wl:p:{value}")])
+        if str(OWNER_ID) not in shown:
+            rows.insert(0, [(f"{OWNER_ID}, owner, {_wl_status(state, str(OWNER_ID))}", f"wl:p:{OWNER_ID}")])
+        rows.append([(t("wl_back"), "wl:menu")])
+        _wl_send(chat_id, t("wl_list_title"), rows)
+    elif data == "wl:add":
+        _whitelist_pending[str(OWNER_ID)] = time.monotonic() + 300
+        _wl_send(chat_id, t("wl_ask_id"))
+    elif len(parts) == 4 and parts[:2] == ["wl", "r"] and parts[3] in ("m", "a", "x"):
+        value, action = parts[2], parts[3]
+        if action == "x":
+            if value in _stranger_ids and not people.is_rejected(value) and not people.is_allowed(value):
+                try:
+                    people.reject(value)
+                    _wl_send(value, t("wl_access_denied"))
+                    _wl_send(chat_id, t("wl_rejected", id=value))
+                except people.ReadOnlyError as exc:
+                    _wl_send(chat_id, t("wl_read_only", error=str(exc)))
+            else:
+                _wl_send(chat_id, t("wl_cancelled") if value not in _stranger_ids else t("wl_already"))
+        elif action == "a":
+            _wl_send(chat_id, t("wl_admin_confirm", id=value), _wl_buttons(
+                [(t("wl_yes_grant"), f"wl:ac:{value}:y"), (t("wl_no"), f"wl:ac:{value}:n")]
+            ))
+        else:
+            _wl_send(chat_id, _wl_finish_add(value, False))
+    elif len(parts) == 4 and parts[:2] == ["wl", "ac"] and parts[3] in ("y", "n"):
+        _wl_send(chat_id, _wl_finish_add(parts[2], True) if parts[3] == "y" else t("wl_cancelled"))
+    elif len(parts) == 3 and parts[:2] == ["wl", "p"]:
+        _wl_person(chat_id, parts[2], state)
+    elif len(parts) == 4 and parts[:2] == ["wl", "s"] and parts[3] in ("m", "a"):
+        value, action = parts[2], parts[3]
+        if not people.is_allowed(value) or value == str(OWNER_ID):
+            _wl_send(chat_id, t("wl_already"))
+        elif (people.role_of(value) == "admin") == (action == "a"):
+            _wl_send(chat_id, t("wl_already"))
+        elif action == "a":
+            _wl_send(chat_id, t("wl_admin_confirm", id=value), _wl_buttons(
+                [(t("wl_yes_grant"), f"wl:ac:{value}:y"), (t("wl_no"), f"wl:ac:{value}:n")]
+            ))
+        else:
+            ok, message = people.revoke_admin(value)
+            _wl_send(chat_id, t("wl_role_changed", id=value, role="member") if ok else t("wl_role_failed", id=value, error=message))
+    elif len(parts) == 3 and parts[:2] == ["wl", "d"]:
+        value = parts[2]
+        _wl_send(chat_id, t("wl_delete_prompt", id=value), _wl_buttons(
+            [(t("wl_keep_data"), f"wl:dc:{value}:k")],
+            [(t("wl_erase_data"), f"wl:dc:{value}:e")],
+            [(t("wl_cancel"), f"wl:dc:{value}:n")]
+        ))
+    elif len(parts) == 4 and parts[:2] == ["wl", "dc"] and parts[3] in ("k", "e", "n"):
+        value, action = parts[2], parts[3]
+        if action == "e":
+            _wl_send(chat_id, t("wl_erase_confirm", id=value), _wl_buttons(
+                [(t("wl_yes_erase"), f"wl:de:{value}:y"), (t("wl_no"), f"wl:de:{value}:n")]
+            ))
+        else:
+            _wl_send(chat_id, _wl_delete(value, False) if action == "k" else t("wl_cancelled"))
+    elif len(parts) == 4 and parts[:2] == ["wl", "de"] and parts[3] in ("y", "n"):
+        _wl_send(chat_id, _wl_delete(parts[2], True) if parts[3] == "y" else t("wl_cancelled"))
 
 
 def _bridge_env_file():
@@ -695,11 +962,16 @@ def handle_persona_reply(chat_id, message):
     return True
 
 
-def handle_command(chat_id, text, state, offset=None):
+def handle_command(chat_id, text, state, offset=None, from_id=None):
     _set_chat_language(state, chat_id)
     cmd, _, arg = text.partition(" ")
     cmd = cmd.lower().strip().lstrip("/.")
     arg = arg.strip()
+
+    if cmd == "whitelist":
+        if str(chat_id) == str(OWNER_ID) and str(from_id) == str(OWNER_ID):
+            _wl_menu(chat_id)
+        return True
 
     if cmd == "start":
         return True
@@ -1170,13 +1442,16 @@ def handle_command(chat_id, text, state, offset=None):
 def _command_payload(language):
     descriptions = COMMAND_DESCRIPTIONS[language]
     return {"commands": [
-        {"command": command, "description": descriptions[command]} for command, _ in COMMANDS
+        {"command": command, "description": descriptions[command]} for command, _ in COMMANDS if command != "whitelist"
     ]}
 
 
 def set_chat_commands(chat_id, language):
+    payload = _command_payload(language)
+    if str(chat_id) == str(OWNER_ID):
+        payload["commands"].append({"command": "whitelist", "description": COMMAND_DESCRIPTIONS[language]["whitelist"]})
     tg_call("setMyCommands", {
-        **_command_payload(language), "scope": {"type": "chat", "chat_id": chat_id},
+        **payload, "scope": {"type": "chat", "chat_id": chat_id},
     })
 
 
@@ -1196,6 +1471,8 @@ def register_commands(state=None):
                 language = data.get("language", "ru")
                 if language in COMMAND_DESCRIPTIONS:
                     set_chat_commands(int(chat_id), language)
+        if str(OWNER_ID) not in state:
+            set_chat_commands(OWNER_ID, "ru")
 
 
 def _run_turn_thread(
@@ -1894,8 +2171,9 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
     login kickoff / code consumption) and the main loop should move on.
     Returns False if the account is ready and normal dispatch should proceed."""
     _set_chat_language(state, chat_id)
-    if str(user_id) not in whitelist:
-        send_whitelist_prompt(chat_id)
+    if not people.is_allowed(user_id) or str(chat_id) != str(user_id):
+        if people._valid_id(chat_id) and str(chat_id) == str(user_id) and not people.is_rejected(user_id):
+            send_whitelist_prompt(chat_id)
         return True
 
     # This is called before normal command/prompt routing by bridge.py, so
@@ -1980,6 +2258,9 @@ def handle_onboarding(chat_id, user_id, text, state, whitelist):
 
 def handle_callback_query(cq, state):
     data = cq.get("data")
+    if isinstance(data, str) and data.startswith("wl:"):
+        _handle_whitelist_callback(cq, state)
+        return
     from_id = cq.get("from", {}).get("id")
     chat_id = cq.get("message", {}).get("chat", {}).get("id")
     if chat_id:
@@ -1988,8 +2269,7 @@ def handle_callback_query(cq, state):
         answer_callback_query(cq["id"])
         return
 
-    whitelist = load_whitelist()
-    if str(from_id) not in whitelist:
+    if not people.is_allowed(from_id):
         answer_callback_query(cq["id"], t('handlers_handle_callback_query_1'), show_alert=True)
         return
 

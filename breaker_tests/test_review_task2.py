@@ -17,11 +17,13 @@ _TMP = tempfile.mkdtemp(prefix="breaker_review_task2_")
 os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxxxxxxxxxx"
 os.environ["OWNER_ID"] = "1000000001"
 os.environ["BRIDGE_STATE_FILE"] = os.path.join(_TMP, "state.json")
+os.environ["BRIDGE_PEOPLE_FILE"] = os.path.join(_TMP, "people.json")
 os.environ.pop("SERVICE_NAME", None)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import bridge  # noqa: E402
+import people  # noqa: E402
 import bridge_exec  # noqa: E402
 import chat_process  # noqa: E402
 import handlers  # noqa: E402
@@ -234,8 +236,8 @@ def test_c07_slow_message_does_not_block_intake_and_keeps_order():
 
 def test_c07_stop_is_recognised_for_urgent_handling():
     state = {}
-    with Capture(bridge__load_whitelist=lambda: {"5"}):
-        msg = {"chat": {"id": 1000000001}, "from": {"id": 5}, "text": "/stop"}
+    with Capture(people__is_allowed=lambda value: str(value) == "1000000005"):
+        msg = {"chat": {"id": 1000000001}, "from": {"id": 1000000005}, "text": "/stop"}
         state["1000000001"] = {"account_status": "ready"}
         assert bridge._is_urgent_stop(msg, state)
         assert not bridge._is_urgent_stop(dict(msg, text="/status"), state)
@@ -425,7 +427,7 @@ def test_c09_voice_without_whisper_gets_explicit_reply():
         bridge__voice_transcription_available=lambda: False,
         bridge__download_telegram_file=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("downloaded")),
         bridge__route_prompt=lambda *a, **kw: routed.append(a),
-        bridge__load_whitelist=lambda: {"1000000001"},
+        people__is_allowed=lambda value: str(value) == "1000000001",
     ):
         bridge._process_message(msg, state)
     assert routed == []

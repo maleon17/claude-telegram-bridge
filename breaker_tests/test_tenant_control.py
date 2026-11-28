@@ -15,7 +15,7 @@ TMP = Path(tempfile.mkdtemp(prefix="bridge_tenant_control_"))
 # Hermetic: the default MCP directory exists on hosts that installed the isolation module.
 os.environ["BRIDGE_ISOLATED_MCP_DIR"] = str(TMP / "no-mcp")
 os.environ.update(TELEGRAM_BOT_TOKEN="fake", OWNER_ID="1000000001",
-                  BRIDGE_STATE_FILE=str(TMP / "state.json"), BRIDGE_ISOLATION="off")
+                  BRIDGE_STATE_FILE=str(TMP / "state.json"), BRIDGE_PEOPLE_FILE=str(TMP / "people.json"), BRIDGE_ISOLATION="off")
 sys.path.insert(0, str(ROOT))
 import handlers  # noqa: E402
 import runtime  # noqa: E402
@@ -50,7 +50,7 @@ def main():
         assert "--mcp-config" not in ordinary
 
         runtime.BRIDGE_ISOLATION = "on"
-        runtime.ISOLATED_TENANTS = frozenset((tenant, owner))
+        runtime.people.add(tenant, owner)
         with patch.object(runtime, "_ensure_tenant_mcp_config", side_effect=AssertionError("tenant MCP write")), \
                 patch.object(handlers, "account_dir", side_effect=AssertionError("tenant config write")):
             persona = Path(handlers._persona_path(tenant))

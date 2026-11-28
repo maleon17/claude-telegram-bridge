@@ -23,6 +23,7 @@ from strings import t
 from telegram_format import format_message, strip_mdv2, escape_mdv2
 from delegate_to_codex_mcp import codex_bridge_dir
 from telegram_actions_link import SERVER_NAME as TELEGRAM_ACTIONS_SERVER, resolve_binding
+import people
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OWNER_ID = os.environ["OWNER_ID"]
@@ -34,7 +35,6 @@ STATE_FILE = os.environ.get(
 STATE_INSTANCE_NAME = os.path.splitext(os.path.basename(STATE_FILE))[0]
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", os.path.expanduser("~/.local/bin/claude"))
 BRIDGE_ISOLATION = os.environ.get("BRIDGE_ISOLATION", "off")
-ISOLATED_TENANTS = frozenset(part.strip() for part in os.environ.get("ISOLATED_TENANTS", "").split(",") if part.strip())
 BRIDGE_TENANT_PROVISION = os.environ.get("BRIDGE_TENANT_PROVISION", "/usr/local/sbin/tenant-provision")
 BRIDGE_TENANT_RUN = os.environ.get("BRIDGE_TENANT_RUN", "/usr/local/sbin/tenant-run")
 _tenant_cache = {}
@@ -62,7 +62,8 @@ def tenant_target(chat_id):
 
 def tenant_isolated(chat_id):
     tenant_id, _ = tenant_identity(chat_id)
-    return BRIDGE_ISOLATION == "on" and tenant_id in ISOLATED_TENANTS
+    exempt = {part.strip() for part in os.environ.get("BRIDGE_ISOLATION_EXEMPT", "").split(",")}
+    return BRIDGE_ISOLATION == "on" and tenant_id not in exempt and people.is_allowed(tenant_id)
 
 
 def tenant_control_dir(chat_id):
@@ -624,18 +625,11 @@ pending_logins = {}
 
 
 def load_whitelist():
-    ids = {str(OWNER_ID)}
-    if os.path.exists(WHITELIST_FILE):
-        try:
-            with open(WHITELIST_FILE) as f:
-                raw = f.read()
-            for part in raw.replace("\n", ",").split(","):
-                part = part.strip()
-                if part:
-                    ids.add(part)
-        except Exception:
-            pass
-    return ids
+    try:
+        known = set(people.load()["people"])
+    except (ValueError, AttributeError, TypeError):
+        known = set()
+    return {value for value in (known | {str(OWNER_ID)}) if people.is_allowed(value)}
 
 
 def default_claude_config_dir():

@@ -13,6 +13,7 @@ TEST_ROOT = Path(tempfile.mkdtemp(prefix="bridge_jarvis_login_"))
 os.environ["TELEGRAM_BOT_TOKEN"] = "000000:FAKE-NOT-A-REAL-TOKEN-xxxxxxxxxxxxxxxxxxxxxxx"
 os.environ["OWNER_ID"] = "1000000001"
 os.environ["BRIDGE_STATE_FILE"] = str(TEST_ROOT / "state.json")
+os.environ["BRIDGE_PEOPLE_FILE"] = str(TEST_ROOT / "people.json")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import handlers  # noqa: E402
@@ -31,6 +32,7 @@ def wait_for(predicate, timeout=8):
 def main():
     owner = int(os.environ["OWNER_ID"])
     other = owner + 1
+    runtime.people.add(other, owner)
     config_dir = TEST_ROOT / "worker_home"
     config_dir.mkdir()
     stub_log = TEST_ROOT / "stub_calls.jsonl"

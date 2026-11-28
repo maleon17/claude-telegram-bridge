@@ -142,7 +142,7 @@ def main():
     with patch.object(runtime, "ensure_tenant", side_effect=provision), \
             patch.object(runtime, "codex_bridge_dir", return_value=None), \
             patch.object(runtime, "BRIDGE_ISOLATION", "on"), \
-            patch.object(runtime, "ISOLATED_TENANTS", frozenset({tenant})), \
+            patch.object(runtime.people, "is_allowed", side_effect=lambda value: str(value) == tenant), \
             patch.dict(os.environ, {"BRIDGE_ISOLATED_MCP_DIR": str(ROOT),
                                  "BRIDGE_TENANT_CONTROL_DIR": str(TMP / "control")}):
         servers = runtime._isolated_mcp_servers(tenant)

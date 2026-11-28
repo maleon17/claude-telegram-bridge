@@ -10,10 +10,12 @@ ROOT = Path(__file__).resolve().parent.parent
 TMP = Path(tempfile.mkdtemp(prefix="bridge_admin_note_"))
 os.environ["BRIDGE_ISOLATED_MCP_DIR"] = str(TMP / "no-mcp")
 os.environ.update(TELEGRAM_BOT_TOKEN="fake", OWNER_ID="1000000001", BRIDGE_STATE_FILE=str(TMP / "state.json"),
-                  BRIDGE_ISOLATION="on", ISOLATED_TENANTS="1000000002,1000000003",
+                  BRIDGE_ISOLATION="on", BRIDGE_PEOPLE_FILE=str(TMP / "people.json"),
                   BRIDGE_TENANT_CONTROL_DIR=str(TMP / "control"))
 sys.path.insert(0, str(ROOT))
 import runtime  # noqa: E402
+runtime.people.add("1000000002", "1000000001")
+runtime.people.add("1000000003", "1000000001")
 
 
 def main():
