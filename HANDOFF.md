@@ -50,6 +50,9 @@ format in telegram-ai-core's README). There is no import-level coupling.
   own chat and writes it where the acceptance said; the tool waits for that
   answer and returns it. The Codex bridge's `delegate-to-claude` is the
   mirror image and lands in this bridge's `cross_delegate_queue/`.
+- **Runtime note for isolated tenants.** `runtime.ISOLATION_NOTE` (no sudo/apt, install tools in user space, ask the
+  owner for system packages) is appended to the *staged* persona copy on every isolated turn, never to the stored
+  persona, so it reaches already migrated tenants and the tenant cannot remove it.
 - **Bridge → the owner's Telegram account.** `telegram_actions_link.py`: if the
   chat's Telegram id is the registered owner of a ClaudeAsk/CodexAsk instance
   (the relay's owners map decides, not the model), the tenant gets a

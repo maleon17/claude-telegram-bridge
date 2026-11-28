@@ -180,7 +180,11 @@ def stage_tenant_control(chat_id):
     for source, name in ((tenant_persona_path(chat_id), f"persona{suffix}.md"),
                          (tenant_mcp_path(chat_id), f"mcp{suffix}.json")):
         with open(source, "rb") as handle:
-            _atomic_control_write(os.path.join(exchange, name), handle.read(), 0o644)
+            data = handle.read()
+        if name.startswith("persona"):
+            # The fixed runtime note is added to the staged copy only, never to the stored persona.
+            data = with_isolation_note(data.decode("utf-8")).encode("utf-8")
+        _atomic_control_write(os.path.join(exchange, name), data, 0o644)
     return exchange
 
 
@@ -426,6 +430,26 @@ FILE_SEND_RESULT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "file_send_result"
 )
 FILE_SEND_MAX_CAPTION_CHARS = 1024
+ISOLATION_NOTE = """
+## Среда выполнения
+
+Ты работаешь в изолированной среде под отдельным непривилегированным пользователем.
+`sudo`, установка пакетов через `apt`/`dpkg` и любое повышение прав здесь недоступны:
+это штатное ограничение, а не ошибка. Нужные инструменты ставь в пользовательское
+пространство: `pip install --user` или виртуальное окружение (`python3 -m venv`),
+`npm` с префиксом в домашней папке, готовые бинарники в `~/.local/bin`. Если без
+системного пакета не обойтись, не пытайся обойти ограничение, а скажи пользователю,
+что такой пакет должен поставить владелец сервера.
+""".strip()
+
+
+def with_isolation_note(text):
+    """Persona text as the isolated agent sees it: the stored persona plus the fixed runtime note."""
+    if ISOLATION_NOTE in text:
+        return text
+    return text.rstrip() + "\n\n" + ISOLATION_NOTE + "\n"
+
+
 FILE_SEND_AGENTS_MARKER = "## Отправка файлов в Telegram"
 FILE_SEND_AGENTS_SECTION = """
 ## Отправка файлов в Telegram

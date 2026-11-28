@@ -64,7 +64,11 @@ def main():
             assert argv[-7:] == ["claude", "--append-system-prompt-file",
                                  str(exchange / "persona.md"), "--mcp-config",
                                  str(exchange / "mcp.json"), "--strict-mcp-config", "-p"]
-            assert (exchange / "persona.md").read_bytes() == persona.read_bytes()
+            staged = runtime.with_isolation_note(persona.read_text(encoding="utf-8")).encode("utf-8")
+            assert (exchange / "persona.md").read_bytes() == staged
+            assert runtime.ISOLATION_NOTE.encode() in staged and b"sudo" in staged
+            assert runtime.ISOLATION_NOTE not in persona.read_text(encoding="utf-8")  # the stored persona is untouched
+            assert runtime.with_isolation_note(staged.decode()) == staged.decode()  # idempotent
             assert mode(exchange / "persona.md") == 0o644
             mcp = Path(runtime.tenant_mcp_path(tenant))
             assert mode(mcp) == 0o600 and mode(exchange / "mcp.json") == 0o644
@@ -76,7 +80,7 @@ def main():
             (exchange / "persona.md").write_text("tenant replacement")
             (exchange / "mcp.json").write_text('{"mcpServers":{"evil":{}}}')
             runtime.tenant_run_argv(tenant, "main", args=("-p",))
-            assert (exchange / "persona.md").read_bytes() == persona.read_bytes()
+            assert (exchange / "persona.md").read_bytes() == staged
             assert (exchange / "mcp.json").read_bytes() == mcp.read_bytes()
 
             delegate = Path(runtime.tenant_persona_path("delegate:" + tenant))
