@@ -52,6 +52,11 @@ def main():
         exchange_io.process_tenant_queue(int(tenant), str(exchange), send, 32)
         assert delegated.exists() and not (exchange / "result" / delegated.name).exists(), prefix
         delegated.unlink()
+    brokered = exchange / "queue" / f"mcpcall-{uuid.uuid4()}.json"
+    brokered.write_text(json.dumps({"server": "example", "method": "tools/list", "params": {}}))
+    exchange_io.process_tenant_queue(int(tenant), str(exchange), send, 32)
+    assert brokered.exists() and not (exchange / "result" / brokered.name).exists()
+    brokered.unlink()
 
     good = request({"path": str(payload), "caption": "hello", "chat_id": int(other)})
     assert good == {"done": True, "ok": True, "text": "Файл отправлен."}
@@ -78,7 +83,11 @@ def main():
     assert request(b"x" * (exchange_io.REQUEST_MAX_BYTES + 1))["ok"] is False
     assert request(b"{broken")["ok"] is False
     assert request(('{"path":' + json.dumps(str(payload)) + ',"path":"other"}').encode())["ok"] is False
-    assert request({"path": str(payload)}, "bad.json")["ok"] is False
+    bad = exchange / "queue" / "bad.json"
+    bad.write_text(json.dumps({"path": str(payload)}))
+    exchange_io.process_tenant_queue(int(tenant), str(exchange), send, 32)
+    assert bad.exists() and not (exchange / "result" / bad.name).exists()
+    bad.unlink()
     assert len(calls) == 1
     # A FIFO or symlink in the queue itself must never block or be followed.
     fifo_name = f"{uuid.uuid4()}.json"

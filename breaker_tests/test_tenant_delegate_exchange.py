@@ -214,8 +214,8 @@ def watchers_do_not_eat_each_other():
     file_result = json.loads((exchange / "result" / f"{file_id}.json").read_text())
     assert delegate_result["ok"] is True and delegate_result["text"] == "answered"
     assert file_result["ok"] is True
-    # Whoever saw the junk name first refused it; neither watcher left it behind or touched the real requests.
-    assert not any((exchange / "queue").iterdir())
+    # Unknown names are left untouched by both watchers.
+    assert [p.name for p in (exchange / "queue").iterdir()] == [junk]
 
 
 if __name__ == "__main__":

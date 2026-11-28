@@ -166,6 +166,22 @@ peer queue, and returns the answer through `.exchange/result/`. Text is capped
 at 32,000 characters; each tenant may have one outstanding request, and the
 global forwarding worker pool is bounded. Missing peer or script omits the MCP.
 
+Brokered MCP gives an isolated tenant owner-side servers through the root-owned
+`brokered_mcp_exchange_mcp.py` proxy in `BRIDGE_ISOLATED_MCP_DIR`. The bridge
+reads ignored `mcp_servers.json` beside `bridge.py`: each named entry is either
+`{"type":"stdio","command":"...","args":[],"env":{},"cwd":"..."}` or
+`{"type":"http","url":"http://127.0.0.1:PORT/mcp","headers":{}}`; see
+`mcp_servers.example.json`. Give a tenant access in bridge-owned, mode `0600`
+`tenant_control/<tenant_id>/mcp_grants.json`, for example
+`{"servers":{"example-stdio":{"tools":["*"]},"example-http":{"tools":["query_document"]}}}`.
+Only servers with a grant, definition, and installed proxy enter the staged
+strict MCP config. Calls use `.exchange/queue/mcpcall-<uuid>.json` and
+`.exchange/result/`. The bridge derives identity from the tenant directory,
+filters listed tools, and checks each call. Limits are 64 KB per request,
+256 KB per result, four outstanding calls per tenant, and 110 seconds on the
+bridge (120 seconds in the proxy). Owner-side env and headers never enter the
+tenant config.
+
 Every tenant's persona also carries a short workspace rule (`WORKSPACE_RULES`
 in `runtime.py`, appended once in the persona's language): work inside the
 tenant's own working folder rather than the home directory, and move the

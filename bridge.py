@@ -38,6 +38,7 @@ from runtime import (
 )
 from tenant_exchange import process_tenant_queue
 from tenant_delegate_exchange import process_tenant_delegate_queue
+from tenant_mcp_broker import process_tenant_mcp_queue
 from delegate_to_codex_mcp import codex_bridge_dir
 from state_store import (
     _set_chat_language, clear_pending_prompt, get_account_status, get_pending_prompt,
@@ -184,6 +185,19 @@ def _isolated_delegate_watcher_loop(tenant_id):
             process_tenant_delegate_queue(tenant_id, exchange)
         except Exception as exc:
             print(f"Isolated delegation queue unavailable for tenant {tenant_id}: {type(exc).__name__}", flush=True)
+
+
+def _isolated_mcp_watcher_loop(tenant_id):
+    """Poll brokered MCP calls from one isolated tenant."""
+    while True:
+        time.sleep(1.0)
+        if BRIDGE_ISOLATION != "on":
+            continue
+        try:
+            exchange = ensure_tenant(tenant_id, "main")["exchange"]
+            process_tenant_mcp_queue(tenant_id, exchange)
+        except Exception as exc:
+            print(f"Isolated MCP queue unavailable for tenant {tenant_id}: {type(exc).__name__}", flush=True)
 
 
 def _is_forwarded_message(msg):
@@ -948,6 +962,8 @@ def main():
         for tenant_id in ISOLATED_TENANTS:
             if tenant_id.isdecimal():
                 threading.Thread(target=_isolated_file_send_watcher_loop,
+                                 args=(tenant_id,), daemon=True).start()
+                threading.Thread(target=_isolated_mcp_watcher_loop,
                                  args=(tenant_id,), daemon=True).start()
                 if delegation_ready:
                     threading.Thread(target=_isolated_delegate_watcher_loop,

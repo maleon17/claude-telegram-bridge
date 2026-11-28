@@ -131,6 +131,17 @@ def _isolated_mcp_servers(chat_id):
                                         "args": [delegate_script], "env": {}}
     else:
         print("Isolated Codex delegation unavailable: MCP script or peer bridge missing", flush=True)
+    broker_script = os.path.join(directory, "brokered_mcp_exchange_mcp.py")
+    if os.path.isfile(broker_script):
+        from tenant_mcp_broker import server_definitions, tenant_grants, SERVER_RE
+        tenant_id, _ = tenant_identity(chat_id)
+        definitions = server_definitions()
+        exchange = ensure_tenant(chat_id, tenant_target(chat_id)[0])["exchange"]
+        for name in tenant_grants(tenant_id):
+            if isinstance(name, str) and SERVER_RE.fullmatch(name) and name in definitions and name not in servers:
+                servers[name] = {"type": "stdio", "command": "/usr/bin/python3",
+                                 "args": [broker_script],
+                                 "env": {"BROKERED_SERVER": name, "TENANT_EXCHANGE_DIR": exchange}}
     return servers
 
 

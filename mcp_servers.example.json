@@ -1,0 +1,14 @@
+{
+  "example-stdio": {
+    "type": "stdio",
+    "command": "/absolute/path/to/server",
+    "args": [],
+    "env": {},
+    "cwd": "/absolute/working/directory"
+  },
+  "example-http": {
+    "type": "http",
+    "url": "http://127.0.0.1:PORT/mcp",
+    "headers": {}
+  }
+}

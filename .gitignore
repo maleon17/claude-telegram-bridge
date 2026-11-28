@@ -13,6 +13,7 @@ cross_delegate_result/
 whitelist.txt
 accounts/
 tenant_control/
+mcp_servers.json
 uploads_*/
 __pycache__/
 .venv/

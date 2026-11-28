@@ -103,6 +103,12 @@ For isolated tenants, the bridge keeps persona and MCP configuration in its `ten
 Incoming attachments go to `.exchange/inbox/`; agents place outgoing files in `.exchange/outbox/` and submit them through the MCP tool's `.exchange/queue/`, with replies in `.exchange/result/`. Requests are limited to 64 KB, captions to 1024 characters, and outgoing files to `TELEGRAM_FILE_MAX_BYTES`. Inbox files are kept for up to 7 days and within a 500 MB total.
 When the Codex bridge and the isolated `delegate-to-codex` MCP script are installed, Claude writes delegation requests through `.exchange/queue/` and receives replies in `.exchange/result/`. The bridge forwards only the `text` field to the Codex bridge for the tenant identified by the exchange directory. Delegation text is limited to 32,000 characters, with one outstanding request per tenant and a bounded global worker pool. If the peer bridge or script is absent, the tool is omitted.
 
+### Brokered MCP for isolated tenants
+
+The bridge can run owner-side MCP servers while an isolated tenant sees only a thin, root-owned `brokered_mcp_exchange_mcp.py` proxy. Install that script in `BRIDGE_ISOLATED_MCP_DIR`, then create bridge-owned, mode `0600` `mcp_servers.json` beside `bridge.py` (see `mcp_servers.example.json`). Entries are named servers with either `{"type":"stdio","command":"...","args":[],"env":{},"cwd":"..."}` or `{"type":"http","url":"http://127.0.0.1:PORT/mcp","headers":{}}`. Keep real commands, URLs, and secrets in this ignored file.
+
+Grant a tenant access with bridge-owned, mode `0600` `tenant_control/<tenant_id>/mcp_grants.json`, for example `{"servers":{"example-stdio":{"tools":["*"]},"example-http":{"tools":["query_document"]}}}`. The bridge adds a proxy only when the grant, server definition, and installed script all exist. Each call goes through `.exchange/queue/mcpcall-<uuid>.json` and `.exchange/result/`; the bridge binds identity to the tenant directory, filters tool listings, and enforces grants on calls. Requests are limited to 64 KB, results to 256 KB, four outstanding calls per tenant, and 110 seconds on the bridge (120 seconds in the proxy). Server environment variables and HTTP headers stay in the bridge process.
+
 ## Together with the rest of Telegram AI
 
 The bridge is complete on its own. When other parts of [Telegram AI](https://github.com/maleon17/telegram-ai) are installed **on the same server**, they find each other automatically (each `setup.sh` records itself in a small registry under `~/.config/telegram-ai/`):
